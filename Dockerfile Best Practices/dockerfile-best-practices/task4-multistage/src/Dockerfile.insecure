@@ -1,0 +1,17 @@
+# Using latest tag (NOT RECOMMENDED)
+FROM node:latest
+
+# Running as root user (SECURITY RISK)
+WORKDIR /app
+
+# Copying everything without ownership consideration
+COPY . .
+
+# Installing with elevated privileges
+RUN npm install
+
+# Exposing privileged port (NOT RECOMMENDED)
+EXPOSE 80
+
+# Running as root
+CMD ["node", "app.js"]
