@@ -1,0 +1,28 @@
+FROM python:3.9-alpine
+
+# Install dependencies and create user
+RUN apk update && apk upgrade && \
+    addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY app_readonly.py .
+
+# Create necessary directories and set permissions
+RUN mkdir -p /tmp/app-data && \
+    chown -R appuser:appuser /app /tmp/app-data
+
+# Switch to non-root user
+USER appuser
+
+EXPOSE 8080
+
+CMD ["python", "app_readonly.py"]
