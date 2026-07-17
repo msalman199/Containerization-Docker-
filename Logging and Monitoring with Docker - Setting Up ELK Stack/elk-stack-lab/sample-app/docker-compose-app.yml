@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  sample-app:
+    build: .
+    container_name: sample-app
+    ports:
+      - "8080:5000"
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "sample-app"
+    networks:
+      - elk-stack-lab_elk-network
+    depends_on:
+      - logstash-forwarder
+
+  nginx-app:
+    image: nginx:alpine
+    container_name: nginx-sample
+    ports:
+      - "8081:80"
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "nginx-app"
+    networks:
+      - elk-stack-lab_elk-network
+    depends_on:
+      - logstash-forwarder
+
+  logstash-forwarder:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: logstash-forwarder
+    command: >
+      bash -c "
+        echo 'input { 
+          gelf { port => 12201 } 
+        } 
+        output { 
+          tcp { 
+            host => \"logstash\" 
+            port => 5000 
+            codec => json_lines 
+          } 
+        }' > /usr/share/logstash/pipeline/logstash.conf &&
+        /usr/local/bin/docker-entrypoint
+      "
+    ports:
+      - "12201:12201/udp"
+    networks:
+      - elk-stack-lab_elk-network
+
+networks:
+  elk-stack-lab_elk-network:
+    external: true
