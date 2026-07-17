@@ -37,5 +37,5 @@ RUN adduser --disabled-password --gecos '' appuser && \
     chown -R appuser:appuser /app
 USER appuser
 
-# Command to run the application
-CMD ["python", "app.py"]
+# Command to run the enhanced application
+CMD ["python", "app_enhanced.py"]
