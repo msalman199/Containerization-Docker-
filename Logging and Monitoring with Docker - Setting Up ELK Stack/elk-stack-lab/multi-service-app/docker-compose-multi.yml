@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  web-frontend:
+    image: nginx:alpine
+    container_name: web-frontend
+    ports:
+      - "8082:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "web-frontend"
+    networks:
+      - elk-stack-lab_elk-network
+    depends_on:
+      - api-backend
+
+  api-backend:
+    image: python:3.9-slim
+    container_name: api-backend
+    command: >
+      bash -c "
+        pip install flask requests &&
+        python -c \"
+from flask import Flask, jsonify
+import logging
+import time
+from datetime import datetime
+
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@app.route('/api/users')
+def users():
+    logger.info('Users API called')
+    return jsonify({'users': ['Alice', 'Bob', 'Charlie']})
+
+@app.route('/api/orders')
+def orders():
+    logger.info('Orders API called')
+    return jsonify({'orders': [{'id': 1, 'item': 'laptop'}, {'id': 2, 'item': 'mouse'}]})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+        \"
+      "
+    ports:
+      - "8083:5000"
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "api-backend"
+    networks:
+      - elk-stack-lab_elk-network
+
+  database:
+    image: postgres:13-alpine
+    container_name: database
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "database"
+    networks:
+      - elk-stack-lab_elk-network
+
+  redis-cache:
+    image: redis:alpine
+    container_name: redis-cache
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://localhost:12201"
+        tag: "redis-cache"
+    networks:
+      - elk-stack-lab_elk-network
+
+networks:
+  elk-stack-lab_elk-network:
+    external: true
