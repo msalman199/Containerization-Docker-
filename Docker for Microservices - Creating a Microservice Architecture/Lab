@@ -1,0 +1,121 @@
+ Docker Microservices Architecture
+Objectives
+Design and deploy a multi-service containerized application using Docker and Docker Compose, with each service independently buildable and runnable
+Implement inter-service HTTP communication across a custom Docker bridge network, where one service calls another by container name
+Expose all services through a single API Gateway container that routes requests, enforces rate limiting, and returns structured error responses when a backend is unreachable
+Prerequisites
+Comfortable navigating and editing files on a Linux/Ubuntu system using the command line
+Familiar with REST API concepts: HTTP methods, status codes, and JSON request/response bodies
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Environment
+Step 1.1 â Install Docker Engine and Docker Compose
+Run the following commands in order. Each block is safe to copy and paste as-is.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+Troubleshoot this step:
+
+You may see "E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list" if the heredoc wrote extra whitespace or a backslash.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the tee block if it is not.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+docker version
+docker compose version
+You should see a Client/Server version block for Docker and a version string for the Compose plugin. If either command returns "command not found", the installation did not complete; re-run the apt-get install line above.
+
+Step 1.2 â Install Node.js 18 via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+Official guide if the URL above changes: https://github.com/nodesource/distributions#debian-and-ubuntu-based-distributions
+
+sudo apt-get install -y nodejs
+node --version
+npm --version
+Troubleshoot this step:
+
+You may see "E: Package 'nodejs' has no installation candidate" if the NodeSource repository was not added correctly.
+Run cat /etc/apt/sources.list.d/nodesource.list â it must contain a line beginning with deb; if the file is missing or empty, re-run the curl setup script above.
+Official reference: https://github.com/nodesource/distributions
+You should see v18.x.x for Node and 9.x.x or higher for npm. Both commands must succeed before proceeding.
+
+Task 2: Design and Build Three Independent Microservices
+A microservice is a small, self-contained application that owns a single business domain and exposes its functionality over HTTP. Your goal is to design and implement three such services â User, Product, and Order â each running in its own Docker container, communicating over a shared Docker bridge network (an isolated virtual network that Docker manages, allowing containers to reach each other by service name).
+
+Step 2.1 â Implement the User Service and Product Service as independently containerized Node.js applications
+Design and implement two services from scratch. You decide the framework, file layout, and internal logic, subject to the constraints below.
+
+User Service constraints:
+
+Listens on port 3001
+Exposes at minimum: GET /health, GET /users, GET /users/:id, POST /users
+POST /users must reject requests missing a name or email field with HTTP 400
+In-memory storage is acceptable; no database is required
+Must include a Dockerfile that produces a working image using node:18-alpine as the base
+Product Service constraints:
+
+Listens on port 3002
+Exposes at minimum: GET /health, GET /products, GET /products/:id, POST /products, PATCH /products/:id/stock
+GET /products must support optional query parameters for filtering by category and price range
+Must include a Dockerfile that produces a working image using node:18-alpine as the base
+Acceptance Criteria:
+
+Running curl -s http://localhost:3001/health and curl -s http://localhost:3002/health against the two containers (started individually with docker run on the correct ports, attached to a Docker bridge network named microservices-net) each return a JSON object containing the keys service and status, with status equal to "healthy", and the HTTP response code is 200.
+
+Running curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3001/users -H "Content-Type: application/json" -d '{"name":"","email":""}' returns 400, and curl -s -X POST http://localhost:3001/users -H "Content-Type: application/json" -d '{"name":"Ada Lovelace","email":"ada@example.com"}' returns a JSON body containing the submitted name and a server-assigned numeric id field with HTTP 201.
+
+Step 2.2 â Implement the Order Service with live inter-service calls
+Design and implement an Order Service that depends on the User Service and Product Service at runtime. The Order Service must call the other two services over the Docker network to validate data before persisting an order.
+
+Order Service constraints:
+
+Listens on port 3003
+Reads USER_SERVICE_URL and PRODUCT_SERVICE_URL from environment variables; defaults to http://user-service:3001 and http://product-service:3002 respectively (Docker Compose will inject these via container name DNS)
+Exposes at minimum: GET /health, GET /orders, GET /orders/:id, GET /orders/user/:userId, POST /orders, PATCH /orders/:id/status
+POST /orders must attempt to verify the user exists and fetch live product prices from the respective services; if a service is unreachable, the endpoint must still respond (degrade gracefully) rather than crash
+Valid order statuses are: pending, processing, shipped, delivered, cancelled; any other value must return HTTP 400
+Must include a Dockerfile using node:18-alpine
+Acceptance Criteria:
+
+With all three containers running on microservices-net, posting a valid order body to http://localhost:3003/orders (containing a real userId and at least one productId that exist in the other services) returns HTTP 201 with a JSON body that includes a computed total field whose value matches the product price multiplied by the requested quantity, confirming that the Order Service fetched live data from the Product Service.
+
+Stopping the User Service container (docker stop user-service) and then posting a new order to http://localhost:3003/orders still returns a non-500 response (HTTP 201 or a structured JSON error with a human-readable message field), confirming graceful degradation; restarting the User Service container restores full validation behavior without restarting the Order Service.
+
+Task 3: Orchestrate with Docker Compose and Route Through an API Gateway
+Docker Compose is a tool that defines and runs multi-container applications from a single YAML file. An API Gateway is a single entry-point container that receives all external requests and proxies them to the correct backend service, hiding internal ports from the outside world.
+
+Step 3.1 â Write a Docker Compose file that orchestrates all four services
+Design a docker-compose.yml that brings up User, Product, Order, and API Gateway services together. You decide the structure, subject to the constraints below.
+
+Constraints:
+
+All four services must share a single user-defined bridge network; no service port except the API Gateway's port 3000 should be exposed to the host (remove the ports mappings from the three backend services so they are only reachable inside the network)
+The Order Service must declare depends_on the User and Product services
+Every service must include a healthcheck block that calls its /health endpoint
+The API Gateway must be the only service with a host port binding, on port 3000
+The API Gateway must read backend URLs from environment variables injected by Compose, using Docker's internal DNS names (service names as hostnames)
+The API Gateway must implement: request logging (method, path, timestamp to stdout), rate limiting (maximum 100 requests per 15-minute window per IP), and reverse proxying for /api/users, /api/products, and /api/orders to the respective backends, stripping the /api prefix before forwarding
+When a backend service is unreachable, the API Gateway must return HTTP 503 with a JSON body containing an error key, not a raw proxy error or HTML page
+Acceptance Criteria:
+
+Running docker compose up -d from the directory containing docker-compose.yml starts all four containers without error; running docker compose ps shows all four services with status running (or healthy if health checks have passed); and curl -s http://localhost:3000/api/users returns the same JSON body as a direct call to the User Service's /users endpoint would, confirming end-to-end routing through the gateway.
+
+Running docker compose up -d --scale product-service=2 (after removing the container_name field from the product-service definition to allow multiple instances) starts two Product Service containers; subsequent calls to curl -s http://localhost:3000/api/products continue to return HTTP 200 responses, confirming the gateway or Compose internal DNS distributes load across both instances without manual reconfiguration.
+
+Expected Outcomes
+Four Docker containers (User, Product, Order, API Gateway) run simultaneously under Docker Compose, with all inter-service traffic flowing over an internal bridge network and all external traffic entering exclusively through port 3000 on the API Gateway.
+The Order Service correctly computes order totals using live data fetched from the Product Service, and degrades gracefully when the User Service is stopped, demonstrating resilient inter-service communication.
+Conclusion
+This lab required you to design a microservices system from first principles: each service owns its domain, communicates over a defined network boundary, and fails without cascading. The API Gateway pattern you implemented is the standard approach for exposing multiple backend services through a single controlled entry point in production systems. The skills applied here â container isolation, service discovery via DNS, graceful degradation, and declarative orchestration â are directly transferable to Kubernetes and cloud-native deployment workflows.
