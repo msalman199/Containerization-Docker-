@@ -1,0 +1,111 @@
+Docker Container Security Hardening
+Objectives
+Design and deploy Docker containers that enforce least-privilege execution using non-root users, dropped Linux capabilities, and read-only filesystems
+Implement mandatory access control on containers using AppArmor profiles to restrict unauthorized resource access
+Construct a production-grade container security pipeline that combines image signing, runtime constraints, and resource limits into a single deployable configuration
+Prerequisites
+Comfort with Linux command-line operations including file permissions, user management, and process inspection
+Familiarity with basic networking concepts such as ports, sockets, and TCP connections
+Understanding of what a container is and how it differs from a virtual machine
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Container Security Toolchain
+Requirement 1
+Install Docker Engine, AppArmor utilities, and Linux capability inspection tools on the bare Ubuntu instance. Docker Engine is the container runtime; AppArmor is a Linux kernel security module that enforces per-program access policies; capability tools allow you to inspect and manipulate the fine-grained privilege units that replace the all-or-nothing root model.
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Note: If the GPG URL above fails, consult the official Docker installation guide at https://docs.docker.com/engine/install/ubuntu/ for the current key URL.
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+Troubleshoot this step:
+
+You may see "E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list" if the heredoc wrote extra whitespace or a literal backslash.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+  apparmor apparmor-utils libcap2-bin python3 python3-pip
+sudo usermod -aG docker $USER
+newgrp docker
+Troubleshoot this step:
+
+You may see "E: Package 'docker-ce' has no installation candidate" if the sources list entry is malformed or the GPG key is missing.
+Run apt-cache policy docker-ce â if the output shows no candidate, re-run the GPG import and sources list steps above, then sudo apt-get update -y.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+Requirement 2
+Confirm every installed component is operational before proceeding. You must observe all four checks passing before moving to Task 2.
+
+docker run --rm hello-world
+sudo systemctl is-active apparmor
+capsh --print | head -5
+python3 --version && pip3 --version
+Acceptance criteria:
+
+docker run --rm hello-world prints "Hello from Docker!" with no error, confirming the daemon is reachable and the student's user has socket access.
+sudo systemctl is-active apparmor returns active, capsh --print outputs a capability bounding set line, and python3 --version returns a 3.x version string.
+Task 2: Design and Deploy a Hardened Container with Runtime Constraints
+Requirement 1
+Design and implement a system that packages a minimal Python HTTP application into a Docker image that enforces non-root execution, a read-only root filesystem, and a stripped capability set. The application must expose one HTTP endpoint that reports the runtime user ID, group ID, and a list of writable paths it can actually reach. You decide the application framework, the Dockerfile structure, the non-root UID and GID values, and which capabilities to drop. The image must not run any process as UID 0 at any point after the build stage. The read-only filesystem constraint must be enforced at container runtime, not inside the Dockerfile. A tmpfs mount (a temporary in-memory filesystem) must be the only writable location available to the running process.
+
+Constraints:
+
+The final image must be built from a slim or alpine base â no full OS images such as ubuntu:latest.
+The Dockerfile must contain no sudo invocations and must not install sudo.
+All capability dropping must happen via docker run flags, not inside the image.
+The container must start and serve HTTP traffic without any manual intervention after docker run.
+Acceptance criteria:
+
+docker exec <container> id returns a UID and GID both greater than 999, confirming the process is non-root.
+docker exec <container> touch /bin/probe fails with a read-only filesystem error, while docker exec <container> touch /tmp/probe succeeds, confirming the tmpfs mount is the sole writable location.
+Requirement 2
+Design and implement a custom AppArmor profile that is loaded into the kernel and applied to the running container. AppArmor profiles are plain-text policy files that list exactly which filesystem paths, network operations, and system calls a confined process may use; any operation not explicitly allowed is denied. The profile must explicitly deny read access to /etc/shadow and write access to /proc/sys/. It must allow the Python interpreter to execute and allow TCP network access on the port your application uses. You decide the profile name, the allow and deny rule ordering, and how to verify enforcement. The profile must be in enforce mode, not complain mode â enforce mode blocks and logs violations, while complain mode only logs them.
+
+Constraints:
+
+The profile file must live under /etc/apparmor.d/.
+You must reload the profile with apparmor_parser after any edit and confirm it appears in sudo aa-status output before testing.
+The container must be started with --security-opt apparmor=<your-profile-name>.
+Acceptance criteria:
+
+curl http://localhost:<port>/read-shadow (or equivalent endpoint you implement) returns a permission-denied message rather than file contents, and sudo journalctl -k | grep apparmor shows a corresponding DENIED audit entry.
+sudo aa-status lists your profile name under "profiles in enforce mode", confirming the profile is active and not in complain mode.
+Task 3: Build a Signed Image and Assemble a Comprehensive Security Manifest
+Requirement 1
+Design and implement a local image signing and verification workflow using Docker Content Trust (DCT) and a local Notary-compatible registry. Docker Content Trust is a mechanism that uses The Update Framework (TUF) to attach cryptographic signatures to image tags, so that a pulling client can verify the image has not been tampered with since it was signed. Deploy a local registry container, generate a delegation key pair, sign the production image you built in Task 2, and push the signed tag to the local registry. You decide the registry port, the key passphrase strategy, and the tag naming convention. The workflow must be fully scripted so that a single shell script reproduces the sign-and-push sequence from scratch.
+
+Constraints:
+
+The local registry must run as a Docker container using the official registry:2 image.
+DOCKER_CONTENT_TRUST=1 must be set for all push and pull operations in your script.
+The script must exit with a non-zero code if any step fails â use set -euo pipefail at the top.
+Do not push to Docker Hub or any external registry.
+Acceptance criteria:
+
+DOCKER_CONTENT_TRUST=1 docker pull localhost:<port>/<image>:<tag> succeeds and prints a digest line, confirming the signed image can be pulled and its signature verified against the local trust store.
+DOCKER_CONTENT_TRUST=1 docker pull localhost:<port>/<image>:unsigned (a tag you push without signing) fails with a trust error, confirming DCT enforcement rejects unsigned tags.
+Requirement 2
+Produce a single docker run command and an accompanying written security manifest that deploys your application with every hardening control from Tasks 1 through 3 active simultaneously. The security manifest is a plain-text or Markdown file that documents each control applied, the specific flag or mechanism used, and the threat it mitigates. The running container must pass all acceptance criteria from Task 2 while also being launched from the signed image in the local registry. Add memory and CPU limits (memory is a hard cap on RAM; CPU limit restricts the share of host CPU time the container may consume) to the run command. The container must restart automatically if it crashes.
+
+Constraints:
+
+Memory limit must be 256 MB or less.
+CPU limit must be 0.5 cores or less.
+The security manifest must list at minimum six distinct controls, each on its own line with a one-sentence threat description.
+The manifest must be committed as a file named SECURITY.md in the working directory.
+Acceptance criteria:
+
+docker inspect <container> | grep -E '"ReadonlyRootfs"|"CapDrop"|"Memory"|"NanoCpus"|"AppArmorProfile"' returns non-empty, non-zero, or non-null values for all five fields in a single command run, confirming every runtime constraint is active.
+cat SECURITY.md | wc -l returns 6 or greater and the file contains the words "non-root", "read-only", "capabilities", "AppArmor", "content trust", and "resource limits" â each appearing at least once â confirming the manifest is complete.
+Expected Outcomes
+A running container that simultaneously enforces non-root execution, a read-only filesystem with tmpfs scratch space, a dropped capability set, an AppArmor enforce-mode profile, memory and CPU limits, and automatic restart â all verified by inspection commands rather than manual observation.
+A reproducible shell script and SECURITY.md manifest that document and automate the full security posture, demonstrating that the hardening is intentional and auditable rather than incidental.
+Conclusion
+This lab required you to reason about container security as a layered system: each control â user namespace, filesystem mutability, Linux capabilities, mandatory access control, image integrity, and resource quotas â addresses a distinct attack surface, and the absence of any single layer leaves a gap an attacker can exploit. The challenge of combining all controls into one working deployment reflects real production requirements, where security and operability must coexist. Carry the habit of treating every default as a potential misconfiguration and every privilege as something that must be explicitly justified.
