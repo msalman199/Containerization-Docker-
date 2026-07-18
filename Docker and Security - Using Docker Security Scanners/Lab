@@ -1,0 +1,254 @@
+Docker Image Security Scanning and Vulnerability Management
+Objectives
+Design and deploy a multi-tool vulnerability scanning pipeline that ingests Docker images and produces structured, machine-readable reports
+Implement a policy enforcement layer that programmatically accepts or rejects images based on configurable severity thresholds
+Construct a GitHub Actions CI/CD workflow that gates container image promotion on passing security scan results
+Prerequisites
+Proficiency with Linux command-line tools including file redirection, process management, and shell scripting
+Familiarity with Docker concepts: images, layers, Dockerfiles, and the image build process
+Working knowledge of JSON data structures and at least one JSON-processing tool such as jq
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Environment Setup â Install and Verify the Security Scanning Toolchain
+Step 1.1: Install System Dependencies, Trivy, and Grype
+Your instance needs three tools: Trivy (a vulnerability scanner that inspects image layers against CVE databases), Grype (an independent scanner from Anchore that cross-references its own database), and jq (a command-line JSON processor used to parse scan output).
+
+Install system dependencies first, then add the Trivy APT repository using a heredoc to avoid line-continuation issues inside single-quoted strings, then install Grype via its installer script.
+
+sudo apt-get update -y
+sudo apt-get install -y curl wget gnupg lsb-release apt-transport-https ca-certificates jq
+# Add Trivy signing key
+sudo mkdir -p /etc/apt/keyrings
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+  | gpg --dearmor \
+  | sudo tee /etc/apt/keyrings/trivy.gpg > /dev/null
+# Official guide: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
+
+sudo tee /etc/apt/sources.list.d/trivy.list <<EOF
+deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y trivy
+Troubleshoot this step:
+
+Error: E: Malformed entry 1 in list file /etc/apt/sources.list.d/trivy.list â the file contains a literal backslash or newline inside the deb line.
+Inspect the file with cat /etc/apt/sources.list.d/trivy.list; it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/trivy.list and recreate using the heredoc above.
+Official reference: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
+curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+  | sudo sh -s -- -b /usr/local/bin
+# Official guide: https://github.com/anchore/grype#installation
+Troubleshoot this step:
+
+Error: curl: (22) The requested URL returned error: 404 â the installer URL has changed upstream.
+Visit https://github.com/anchore/grype/releases and download the latest grype_*_linux_amd64.tar.gz asset manually, then move the binary to /usr/local/bin/grype.
+Official reference: https://github.com/anchore/grype#installation
+Verify both tools respond correctly before proceeding:
+
+trivy --version
+grype version
+jq --version
+Expected output: each command prints a version string with no errors. If any command returns command not found, the binary is not on PATH â confirm the install path with which trivy and which grype.
+
+Step 1.2: Install Docker Engine
+Docker Engine is the container runtime. Install it using the official convenience script, then add your user to the docker group so subsequent commands do not require sudo.
+
+curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+# Official guide: https://docs.docker.com/engine/install/ubuntu/
+sudo sh /tmp/get-docker.sh
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+Error: permission denied while trying to connect to the Docker daemon socket after running docker ps.
+Confirm group membership with groups; if docker is absent, log out and back in, or run exec su -l "$USER" to reload the session.
+Official reference: https://docs.docker.com/engine/install/linux-postinstall/
+Verify Docker is operational:
+
+docker version
+docker run --rm hello-world
+Expected output: docker version prints both Client and Server sections; hello-world prints the "Hello from Docker!" message and exits cleanly.
+
+Task 2: Pull Target Images and Build a Structured Vulnerability Report Pipeline
+Step 2.1: Pull a Vulnerability Contrast Set and Scan with Both Tools
+Pull four images that represent a deliberate security contrast: an end-of-life Ubuntu base, a current Ubuntu base, a full Node.js image, and its Alpine-based equivalent. Alpine Linux is a minimal distribution that ships far fewer packages, which reduces the number of potential vulnerable components.
+
+Your requirement is to pull all four images and produce one Trivy JSON report and one Grype JSON report for each image, storing all eight files under a reports/ directory with filenames that encode the image name and scanner (for example, reports/ubuntu-18.04-trivy.json).
+
+docker pull ubuntu:18.04
+docker pull ubuntu:22.04
+docker pull node:18
+docker pull node:18-alpine
+mkdir -p reports
+The scanning contract your pipeline must satisfy is expressed by the following shell interface. You own the implementation â the function bodies below are intentionally empty:
+
+# Interface contract â implement each function body
+
+# scan_with_trivy IMAGE OUTPUT_FILE
+# Produces a Trivy JSON vulnerability report at OUTPUT_FILE.
+# Must exit non-zero if the scan itself fails (not if vulnerabilities are found).
+scan_with_trivy() {
+    local image="$1"
+    local output_file="$2"
+    # your implementation
+}
+
+# scan_with_grype IMAGE OUTPUT_FILE
+# Produces a Grype JSON vulnerability report at OUTPUT_FILE.
+# Must exit non-zero if the scan itself fails.
+scan_with_grype() {
+    local image="$1"
+    local output_file="$2"
+    # your implementation
+}
+
+# run_contrast_scan IMAGE_LIST_FILE REPORTS_DIR
+# Iterates over newline-separated image names in IMAGE_LIST_FILE,
+# calls both scanners for each, and writes all reports to REPORTS_DIR.
+run_contrast_scan() {
+    local image_list="$1"
+    local reports_dir="$2"
+    # your implementation
+}
+Confirmation: after running your implementation, ls reports/ must show eight .json files, two per image.
+
+Step 2.2: Build a Severity Aggregation Script
+Raw JSON scanner output is not human-readable at a glance. Your requirement is to implement a summarize_reports.sh script that reads every Trivy JSON file in reports/, extracts vulnerability counts grouped by severity (CRITICAL, HIGH, MEDIUM, LOW), and writes a Markdown summary table to reports/summary.md.
+
+The aggregation logic must conform to this typed contract:
+
+# Interface contract â implement each function body
+
+# extract_severity_counts TRIVY_JSON_FILE
+# Prints four lines to stdout in the format:
+#   CRITICAL <count>
+#   HIGH <count>
+#   MEDIUM <count>
+#   LOW <count>
+# Count is 0 if no vulnerabilities of that severity exist.
+extract_severity_counts() {
+    local json_file="$1"
+    # your implementation â hint: the relevant jq path is .Results[].Vulnerabilities[].Severity
+}
+
+# render_markdown_row IMAGE_NAME CRITICAL HIGH MEDIUM LOW
+# Prints one Markdown table row: | image | critical | high | medium | low |
+render_markdown_row() {
+    local image_name="$1"
+    local critical="$2"
+    local high="$3"
+    local medium="$4"
+    local low="$5"
+    # your implementation
+}
+Confirmation: cat reports/summary.md must display a Markdown table with one row per scanned image and correct severity counts. Cross-check one row manually by running trivy image --format table ubuntu:18.04 and comparing the totals.
+
+Task 3: Implement Policy Enforcement and CI/CD Integration
+Step 3.1: Build a Policy Enforcement Gate
+A policy gate is a program that reads a scan report and exits with code 0 (pass) or 1 (fail) based on configurable thresholds. This is the mechanism that prevents a vulnerable image from being promoted to a registry or deployed to production.
+
+Your requirement is to implement policy_gate.sh that accepts a Trivy JSON report path and a policy YAML file path as arguments, evaluates the report against the policy, prints a human-readable verdict, and exits with the appropriate code.
+
+The policy YAML schema your gate must support is exactly:
+
+# policy.yaml â schema definition (this is the contract, not an example to copy verbatim)
+# Students define their own threshold values when testing.
+fail_on:
+  critical_count_exceeds: <integer>   # fail if CRITICAL count is strictly greater than this value
+  high_count_exceeds: <integer>       # fail if HIGH count is strictly greater than this value
+warn_on:
+  medium_count_exceeds: <integer>     # print warning but do not fail
+report_label: <string>                # label printed in the verdict line
+The gate function signature:
+
+# Interface contract
+
+# run_policy_gate TRIVY_JSON POLICY_YAML
+# Prints: "PASS: <report_label>" or "FAIL: <report_label> â <reason>"
+# Exits 0 on pass, 1 on fail.
+run_policy_gate() {
+    local trivy_json="$1"
+    local policy_yaml="$2"
+    # your implementation
+    # Note: bash does not natively parse YAML; use grep/awk or install 'yq'
+    # yq installation: https://github.com/mikefarah/yq#install
+}
+Test your gate against at least two scenarios: one image that should pass (use node:18-alpine with a strict policy) and one that should fail (use ubuntu:18.04 with a zero-tolerance CRITICAL policy). Confirm exit codes with echo $? after each run.
+
+Confirmation: echo $? returns 0 after the alpine scan and 1 after the ubuntu:18.04 scan, assuming your policy thresholds are set appropriately for the actual vulnerability counts you observed in Task 2.
+
+Step 3.2: Construct a GitHub Actions Security Scanning Workflow
+A GitHub Actions workflow is a YAML file stored at .github/workflows/<name>.yml in a repository that GitHub executes automatically on specified triggers. Your requirement is to create a workflow file that builds a Docker image from a Dockerfile in the repository root, runs Trivy against the built image, uploads the SARIF-format report (SARIF is a standard JSON schema for static analysis results that GitHub's Security tab can render) to GitHub's code scanning dashboard, and fails the workflow if any CRITICAL vulnerabilities are found.
+
+The workflow must satisfy these architectural constraints:
+
+The build step must tag the image using the Git commit SHA so each run produces a uniquely identified artifact
+The Trivy scan step must use the official aquasecurity/trivy-action rather than a raw shell command, so the action version is pinned (not @master)
+The policy enforcement step must reuse policy_gate.sh from Step 3.1 by checking it out from the repository and executing it, demonstrating that the gate is not CI-vendor-specific
+The workflow interface contract (fill in all # IMPLEMENT placeholders):
+
+# .github/workflows/docker-security-scan.yml
+
+name: Docker Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # required to upload SARIF to GitHub Security tab
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        # IMPLEMENT: build the image, tag it with github.sha
+        run: # IMPLEMENT
+
+      - name: Run Trivy and produce SARIF report
+        uses: aquasecurity/trivy-action@0.18.0   # pin to a specific version
+        with:
+          image-ref: # IMPLEMENT â reference the image tagged with github.sha
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Run Trivy JSON scan for policy gate
+        uses: aquasecurity/trivy-action@0.18.0
+        with:
+          image-ref: # IMPLEMENT
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH
+
+      - name: Enforce policy gate
+        run: |
+          # IMPLEMENT: install yq if needed, then call policy_gate.sh
+          # policy.yaml must also exist in the repository root
+          bash policy_gate.sh trivy-results.json policy.yaml
+Confirmation: push a commit to your repository's main branch. The Actions tab must show the workflow run; the Security tab must show the uploaded scan findings; the "Enforce policy gate" step must exit with code 1 if your test image contains CRITICAL vulnerabilities, causing the overall job to fail with a red status.
+
+Expected Outcomes
+The reports/summary.md file contains a complete Markdown table showing vulnerability counts by severity for all four contrast images, with the Alpine-based image showing measurably fewer vulnerabilities than its full counterpart.
+The GitHub Actions workflow run produces a visible SARIF report in the repository's Security tab and the policy gate step correctly blocks or passes the build based on the thresholds defined in policy.yaml.
+Troubleshooting
+If your Trivy JSON reports contain empty Vulnerabilities arrays for all images, what does that indicate about the state of the Trivy vulnerability database on your instance, and how would you confirm whether the database was downloaded successfully before the scan ran?
+
+If the policy gate exits with code 0 for ubuntu:18.04 even though the summary table shows dozens of CRITICAL vulnerabilities, what are the two most likely causes related to how the gate reads the policy thresholds and how it queries the JSON report, and what diagnostic output would you add to isolate which one is responsible?
+
+Conclusion
+This lab established a complete, tool-agnostic vulnerability management pipeline: raw scanner output was normalized into structured reports, a configurable policy gate translated those reports into binary deployment decisions, and the entire chain was embedded in a CI/CD workflow that enforces security checks on every code push. The contrast between ubuntu:18.04 and node:18-alpine demonstrates that base image selection is the single highest-leverage decision in reducing a container's attack surface. Integrating policy gates directly into pull request checks ensures that vulnerability acceptance is an explicit, auditable decision rather than an oversight.
