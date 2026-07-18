@@ -1,6 +1,15 @@
 version: '3.8'
 
 services:
+services:
+  web:
+    build: ./web-app
+    container_name: complex-app-web
+    env_file:
+      - .env
+    ports:
+      - "${APP_PORT:-8080}:5000"
+    # ... rest of the configuration remains the same
   # Web Application Service
   web:
     build: ./web-app
