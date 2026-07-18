@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-gke-app
+  labels:
+    app: docker-gke-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: docker-gke-app
+  template:
+    metadata:
+      labels:
+        app: docker-gke-app
+    spec:
+      containers:
+      - name: docker-gke-app
+        image: gcr.io/$PROJECT_ID/docker-gke-app:v1.0
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
