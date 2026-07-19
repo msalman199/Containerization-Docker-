@@ -1,0 +1,9 @@
+logs:
+  - type: docker
+    image: "*"
+    service: docker-containers
+    source: docker
+    sourcecategory: docker
+    tags:
+      - env:lab
+      - team:devops
