@@ -1,0 +1,9 @@
+replicaCount: 1
+
+image:
+  repository: nginx  # Wrong image for our Python app
+  tag: "latest"
+
+app:
+  name: "Broken App"
+  message: "This won't work!"
