@@ -1,0 +1,77 @@
+Advanced Docker Compose â Handling Dependencies in Multi-Service Applications
+Objectives
+Design and implement a health-aware Docker Compose stack in which each service starts only after its upstream dependencies pass readiness checks
+Implement graceful failure handling so that the application layer degrades predictably when a backing service becomes unavailable
+Validate the full dependency chain through automated failure injection and recovery testing
+Prerequisites
+Comfort working on the Linux command line: navigating directories, editing files with a terminal editor, and reading command output
+Familiarity with how web applications communicate with databases and cache layers at the network level
+Understanding of what a container is and why startup order matters when one process depends on another being ready
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Requirement 1.1
+Install Docker Engine, Docker Compose v2, curl, jq, and netcat on the Ubuntu instance, then confirm each tool is reachable from your shell.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release jq netcat-openbsd
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official installation guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' \
+  "$(dpkg --print-architecture)" \
+  "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the printf command wrote a literal backslash into the file instead of a single clean line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list; it must be one unbroken line with no backslashes; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the printf block.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+docker version
+docker compose version
+curl --version
+jq --version
+nc -h 2>&1 | head -1
+Confirmation: every command above prints a version string or usage line with no "command not found" errors.
+
+Requirement 1.2
+Verify that the Docker daemon is running and that your current user can issue Docker commands without sudo.
+
+sudo systemctl enable --now docker
+docker run --rm hello-world
+Confirmation: the hello-world container prints "Hello from Docker!" and exits with code 0; no permission-denied errors appear.
+
+Task 2: Design and Implement a Health-Aware Multi-Service Stack
+Problem Statement
+Design and implement a Docker Compose application consisting of exactly four services â a PostgreSQL database, a Redis cache, a Node.js HTTP API, and an Nginx reverse proxy â such that each service starts only after every service it depends on has passed a container-native health check. The API must expose a /health endpoint that reports the live connection status of both the database and the cache. The Nginx proxy must not start until the API health check passes. All service credentials and ports must be supplied exclusively through a .env file; no credentials may be hard-coded in docker-compose.yml or application source files.
+
+Acceptance Criteria
+Running docker compose up -d from a clean state (no running containers, no named volumes) brings all four services to healthy status within 120 seconds, as shown by docker compose ps reporting healthy for every service that defines a health check; the Nginx proxy must be the last service to reach running state.
+
+A GET request to http://localhost/health through the Nginx proxy returns HTTP 200 with a JSON body that contains a services object listing both database and cache as "connected", confirming that the API successfully reached both backing services after startup.
+
+Task 3: Implement Failure Injection and Automated Recovery Validation
+Problem Statement
+Design and implement a shell script named validate-resilience.sh that programmatically tests three failure scenarios against the running stack: (a) stopping the PostgreSQL container and confirming the API /health endpoint returns HTTP 503 within 15 seconds, then restarting PostgreSQL and confirming the API returns HTTP 200 again within 60 seconds; (b) stopping the Redis container and confirming the API continues to serve data from the database (HTTP 200 on /api/users) even without the cache layer, then restarting Redis and confirming the health endpoint reports cache as "connected" within 60 seconds; (c) stopping the webapp container and confirming Nginx returns HTTP 502 or 503 within 10 seconds, then restarting the webapp and confirming Nginx proxies successfully within 60 seconds. The script must print a clearly labelled PASS or FAIL result for each of the three scenarios and exit with code 0 only if all three pass.
+
+Acceptance Criteria
+Running bash validate-resilience.sh against the live stack completes all three scenarios and prints PASS for each one, then exits with code 0; no scenario may rely on sleep values longer than 5 seconds between individual readiness polls, and the entire script must finish within 4 minutes.
+
+After the script completes, docker compose ps shows all four services in running state with health checks reporting healthy, confirming that the automated restart policy (restart: unless-stopped) restored every service without manual intervention.
+
+Expected Outcomes
+You will have a fully operational four-service Docker Compose stack in which startup order is enforced by health checks and dependency conditions, not by arbitrary sleep timers.
+You will have a repeatable shell script that proves the stack recovers automatically from individual service failures, giving you a concrete model for dependency management in production-style container environments.
+Conclusion
+This lab required you to move beyond simple depends_on ordering and implement genuine readiness gating through health checks, environment-driven configuration, and automated failure validation. The patterns you applied here â health-conditioned dependencies, graceful degradation, and restart policies â are the same patterns used in production container orchestration. Extend this foundation by exploring how Kubernetes liveness and readiness probes map directly to the health check concepts you configured in Docker Compose.
