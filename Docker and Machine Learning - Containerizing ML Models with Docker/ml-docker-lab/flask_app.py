@@ -135,3 +135,31 @@ if __name__ == '__main__':
     # Load or train model on startup
     predictor.load_model()
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+@app.route('/', methods=['GET'])
+def api_documentation():
+    """API documentation"""
+    docs = {
+        'title': 'House Price Prediction API',
+        'version': '1.0',
+        'endpoints': {
+            'GET /': 'API documentation',
+            'GET /health': 'Health check',
+            'POST /predict': 'Predict house price (requires: size, bedrooms, age)',
+            'GET /predictions': 'Get recent predictions from database',
+            'POST /train': 'Retrain the model'
+        },
+        'example_request': {
+            'url': '/predict',
+            'method': 'POST',
+            'body': {
+                'size': 2500,
+                'bedrooms': 3,
+                'age': 10
+            }
+        }
+    }
+    return jsonify(docs)
+
+if __name__ == '__main__': block):
+
