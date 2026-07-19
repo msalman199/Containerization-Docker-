@@ -1,0 +1,201 @@
+Docker Swarm Auto-Scaling in Production
+Objectives
+Design and deploy a multi-service Docker Swarm stack with overlay networking, health checks, and constraint-based placement policies
+Implement a metrics-driven autoscaler that reads live container statistics and issues scaling decisions against the Swarm API
+Validate scaling behavior under synthetic load and perform a zero-downtime rolling update while the autoscaler is active
+Prerequisites
+Comfort with Linux process management, file permissions, and shell scripting on Ubuntu
+Familiarity with HTTP request/response cycles and TCP port binding
+Understanding of containerization concepts: images, layers, namespaces, and cgroups
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Environment Setup and Verification
+Step 1.1: Install Docker Engine and supporting CLI tools
+Your instance has no container runtime. Install Docker Engine from the official repository, then install jq (a JSON processor used to parse Docker API output) and apache2-utils (which provides ab, the Apache HTTP benchmarking tool used in Task 3).
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release jq apache2-utils
+
+sudo install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+If the gpg command fails, the official installation guide is at: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the heredoc wrote a broken line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be one unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate using the heredoc above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo usermod -aG docker $USER
+newgrp docker
+docker version
+docker compose version
+jq --version
+ab -V
+You should see Docker Engine version output, Compose version output, a jq version string, and the ab version line. If any command returns command not found, the corresponding package did not install correctly.
+
+Step 1.2: Initialize Docker Swarm and verify cluster state
+Docker Swarm is Docker's native clustering mode. A Swarm consists of manager nodes (which schedule work) and worker nodes (which run containers). In this single-node lab the manager also acts as a worker.
+
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
+docker swarm init --advertise-addr "$PRIVATE_IP"
+docker node ls
+docker info --format '{{.Swarm.LocalNodeState}}'
+The docker node ls output must show exactly one node with STATUS=Ready, AVAILABILITY=Active, and MANAGER STATUS=Leader. The docker info command must print active.
+
+Troubleshoot this step:
+
+You may see: Error response from daemon: must specify a listening address because the address to advertise is not recognized as a system address â this means hostname -I returned an unexpected value.
+Run ip addr show to find the correct interface IP and pass it explicitly: docker swarm init --advertise-addr <your-ip>.
+Official reference: https://docs.docker.com/engine/swarm/swarm-tutorial/create-swarm/
+Task 2: Build and Deploy a Scalable Service Stack
+Step 2.1: Build a containerized web service with a structured health endpoint
+Design a Node.js (or Python Flask) HTTP service that satisfies all of the following constraints:
+
+Exposes GET / returning JSON with at minimum the fields hostname, version, and replica_id
+Exposes GET /health returning {"status": "ok"} with HTTP 200; this endpoint must respond within 200 ms under no load
+Exposes GET /stress that performs CPU-bound work for exactly 800 ms before responding, used to drive autoscaler decisions in Task 3
+The image must be built locally and tagged swarm-app:v1; it must not pull from a public registry at runtime
+Your Dockerfile must include a HEALTHCHECK instruction that calls /health every 20 seconds with a 5-second timeout and 2 retries before marking the container unhealthy.
+
+The service interface contract is:
+
+interface HealthResponse {
+  status: "ok" | "degraded";
+  hostname: string;
+  uptime_seconds: number;
+}
+
+interface RootResponse {
+  hostname: string;
+  version: string;
+  replica_id: string;
+  timestamp: string;
+}
+
+interface StressResponse {
+  hostname: string;
+  duration_ms: number;
+  completed: boolean;
+}
+Confirm the image builds without error and that docker run --rm -p 3000:3000 swarm-app:v1 responds correctly to curl -s http://localhost:3000/health before proceeding.
+
+Step 2.2: Deploy a Swarm stack with placement constraints and resource limits
+A Swarm stack (defined in a Compose file with version: "3.8" or higher) allows you to declare services, networks, and deployment policies as a single unit. Deploy a stack named prod that satisfies all of the following constraints:
+
+The web service runs swarm-app:v1 with an initial replica count of 2
+Each replica is constrained to at most 0.5 CPU and 128 MB of memory via resources.limits
+The service publishes port 8080 on the host using ingress mode (Docker Swarm's built-in load balancer that distributes requests across all replicas)
+All services communicate over a dedicated overlay network named prod-net with attachable: true
+The rolling update policy sets parallelism: 1, delay: 15s, and failure_action: rollback
+docker stack deploy -c docker-compose.yml prod
+docker stack services prod
+docker service ps prod_web
+Confirm that docker stack services prod shows 2/2 replicas running and that curl -s http://localhost:8080/health returns {"status":"ok"} before proceeding.
+
+Task 3: Implement a Metrics-Driven Autoscaler and Validate Under Load
+Step 3.1: Implement a polling autoscaler as a long-running shell process
+The autoscaler is a shell script that runs as a background process on the manager node. It must satisfy all of the following behavioral contracts:
+
+Poll docker stats --no-stream --format json every 15 seconds to collect aggregate CPU percentage across all running tasks of prod_web
+Compute the mean CPU percentage across all sampled containers; if the mean exceeds 60%, issue a scale-up by one replica (up to a hard maximum of 8); if the mean falls below 15% for two consecutive polling cycles, issue a scale-down by one replica (down to a hard minimum of 2)
+Write every decision (timestamp, mean CPU, current replicas, action taken) as a single JSON line to ~/autoscaler.log so decisions can be audited
+Never issue more than one scaling command per polling cycle; after issuing a scale command, skip the next polling cycle entirely to allow Swarm to converge before re-evaluating
+The autoscaler interface contract is:
+
+# autoscaler.sh
+# Required environment variables (must be set before running):
+#   SERVICE_NAME   â fully qualified Swarm service name (e.g. prod_web)
+#   MIN_REPLICAS   â integer lower bound
+#   MAX_REPLICAS   â integer upper bound
+#   CPU_HIGH       â scale-up threshold as integer percentage (e.g. 60)
+#   CPU_LOW        â scale-down threshold as integer percentage (e.g. 15)
+#   POLL_INTERVAL  â seconds between polls (e.g. 15)
+#   LOG_FILE       â absolute path to the JSONL audit log
+
+# Exit codes:
+#   0 â clean shutdown via SIGTERM
+#   1 â SERVICE_NAME not found in Swarm at startup
+Run the autoscaler in the background before starting the load test:
+
+export SERVICE_NAME=prod_web MIN_REPLICAS=2 MAX_REPLICAS=8 \
+       CPU_HIGH=60 CPU_LOW=15 POLL_INTERVAL=15 \
+       LOG_FILE=~/autoscaler.log
+bash autoscaler.sh &
+AUTOSCALER_PID=$!
+echo "Autoscaler PID: $AUTOSCALER_PID"
+Confirm the log file exists and contains at least one JSON line before proceeding:
+
+sleep 20
+cat ~/autoscaler.log
+Step 3.2: Drive scaling events with synthetic load and perform a rolling update
+Generate enough HTTP load to push mean container CPU above the 60% threshold, observe the autoscaler scale up, then perform a zero-downtime rolling update to swarm-app:v2 while load is still running.
+
+Phase A â Generate load:
+
+ab -n 50000 -c 40 -k http://localhost:8080/stress &
+LOAD_PID=$!
+While load runs, watch replica count change in real time:
+
+watch -n 5 'docker service ls --filter name=prod_web --format "table {{.Name}}\t{{.Replicas}}" && echo "" && tail -5 ~/autoscaler.log | jq .'
+You must observe at least one scale-up event in ~/autoscaler.log before proceeding to Phase B.
+
+Phase B â Rolling update under load:
+
+Build swarm-app:v2 by modifying the version field in your application's root response to "v2" and rebuilding the image. Then issue the update:
+
+docker build -t swarm-app:v2 .
+docker service update \
+  --image swarm-app:v2 \
+  --update-parallelism 1 \
+  --update-delay 15s \
+  --update-order start-first \
+  prod_web
+Monitor the update convergence:
+
+docker service ps prod_web --format "table {{.Name}}\t{{.Image}}\t{{.CurrentState}}\t{{.DesiredState}}"
+Phase C â Stop load and observe scale-down:
+
+kill $LOAD_PID
+Wait at least two polling cycles (30 seconds) and confirm the autoscaler logs a scale-down event and replica count returns toward the minimum.
+
+Phase D â Stop autoscaler and clean up:
+
+kill $AUTOSCALER_PID
+docker stack rm prod
+docker network rm prod-net 2>/dev/null || true
+docker swarm leave --force
+docker image rm swarm-app:v1 swarm-app:v2 2>/dev/null || true
+Confirm docker node ls returns an error indicating Swarm is no longer active.
+
+Code Contracts
+// Autoscaler decision record â each line written to LOG_FILE must conform to this shape
+interface ScalerDecision {
+  timestamp: string;          // ISO 8601
+  mean_cpu_pct: number;       // 0â100, two decimal places
+  current_replicas: number;
+  action: "scale_up" | "scale_down" | "no_action" | "cooldown_skip";
+  new_replicas: number | null; // null when action is no_action or cooldown_skip
+}
+# docker stats output format string used by the autoscaler
+# Students must parse this output; the format flag controls which fields are emitted
+docker stats --no-stream --format '{"name":"{{.Name}}","cpu":"{{.CPUPerc}}"}'
+Expected Outcomes
+~/autoscaler.log contains a chronological sequence of ScalerDecision JSON lines showing at least one scale_up event during load and at least one scale_down event after load stops
+docker service ps prod_web (captured before cleanup) shows tasks running swarm-app:v2 with no tasks in Failed state, confirming the rolling update completed without dropping the service
+Troubleshooting
+If the autoscaler never triggers a scale-up despite load running, what does the raw output of docker stats --no-stream show for the prod_web tasks, and does the CPU percentage reflect work on the /stress endpoint or on a different endpoint â and what would explain the discrepancy?
+
+If the rolling update stalls with tasks stuck in Preparing state, what does docker service ps prod_web --no-trunc reveal about the failure reason, and how would you determine whether the issue is an image pull failure, a health check timeout, or a resource limit violation?
+
+Conclusion
+This lab demonstrated how Docker Swarm's scheduling primitives â overlay networks, ingress load balancing, resource limits, and rolling update policies â compose into a production-grade deployment model. The custom autoscaler exposed the gap between Swarm's declarative API and the reactive control logic that production systems require, which purpose-built orchestrators like Kubernetes address natively. The rolling update exercise under live load confirmed that start-first ordering and health-check gating are the minimum requirements for zero-downtime deployments in any replicated service architecture.
