@@ -1,0 +1,16 @@
+FROM nginx:alpine
+
+# Install curl for health checks
+RUN apk add --no-cache curl
+
+# Copy application files
+COPY index.html /usr/share/nginx/html/
+COPY healthcheck.sh /usr/local/bin/
+
+EXPOSE 80
+
+# Enhanced health check
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
+
+CMD ["nginx", "-g", "daemon off;"]
