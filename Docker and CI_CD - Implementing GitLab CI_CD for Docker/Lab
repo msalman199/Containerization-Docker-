@@ -1,0 +1,94 @@
+ Implementing GitLab CI/CD for Docker
+Objectives
+Design and configure a multi-stage GitLab CI/CD pipeline that builds, tests, and pushes Docker images automatically on every commit
+Implement automated container-based testing that validates application health and endpoint correctness inside isolated Docker containers
+Integrate Docker Hub as a remote image registry within a GitLab pipeline using securely stored credentials
+Prerequisites
+Familiarity with Linux command-line operations on Ubuntu, including file editing, process management, and environment variables
+Basic understanding of Git workflows: cloning repositories, branching, committing, and pushing changes
+Active accounts on both GitLab (gitlab.com) and Docker Hub (hub.docker.com) before starting the lab
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Problem statement: Your EC2 instance has no development tools installed. Design an installation sequence that produces a fully operational environment containing Docker Engine, Git, curl, and Node.js, and verify each tool is functional before proceeding.
+
+Step 1: Install Docker Engine, Git, curl, and Node.js from their official package sources, configure Docker so your non-root user can run containers without sudo, and start the Docker daemon.
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg git
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official Docker installation guide (use this if the URL above changes): https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+
+sudo systemctl enable docker
+sudo systemctl start docker
+Troubleshoot this step:
+
+You may see: "E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list" â this means the file contains a literal backslash or newline inside the deb line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc form above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+Official Node.js installation guide (use this if the URL above changes): https://github.com/nodesource/distributions
+
+Troubleshoot this step:
+
+You may see: "E: Unable to locate package nodejs" after running the setup script, meaning the NodeSource repository was not added correctly.
+Run cat /etc/apt/sources.list.d/nodesource.list to confirm the file exists and contains a valid deb line, then re-run sudo apt-get update -y before retrying the install.
+Official reference: https://github.com/nodesource/distributions#installation-instructions
+Step 2: Verify every installed tool reports a version number and Docker can run a container end-to-end.
+
+git --version
+node --version
+npm --version
+curl --version | head -1
+docker --version
+docker run --rm hello-world
+Confirmation: Each command prints a version string without error, and docker run --rm hello-world prints "Hello from Docker!" before the container exits cleanly.
+
+Task 2: Build a Containerized Application and a Multi-Stage GitLab CI/CD Pipeline
+Problem statement: Design and implement a system in which every git push to the main branch of a GitLab repository automatically triggers a GitLab CI/CD pipeline (a YAML-defined automation workflow) that builds a Docker image from your application source, runs your test suite inside a container, and pushes the verified image to Docker Hub tagged with both the Git commit SHA and latest.
+
+Constraints:
+
+The pipeline must use Docker-in-Docker (a GitLab CI service that runs a Docker daemon inside the CI job container) for all Docker operations.
+Credentials for Docker Hub must never appear in any committed file; they must be stored exclusively as masked GitLab CI/CD variables.
+The build stage must fail the pipeline if the Dockerfile contains a syntax error or the image cannot be built.
+The test stage must start the application container, wait for it to be ready, and assert that both the root endpoint and a /health endpoint return HTTP 200 with valid JSON before the stage is marked as passed.
+The push stage must run only on the main branch and only after the test stage passes.
+Acceptance criteria:
+
+A commit pushed to main produces a completed GitLab pipeline in which all three stages (build, test, push) show a green passed status with no manual intervention, and the pipeline log for the push stage shows both the commit-SHA-tagged image and the latest-tagged image successfully pushed to Docker Hub.
+The Docker Hub repository for the image shows at least two tags after the pipeline completes: one matching the seven-character Git commit SHA visible in the GitLab pipeline view, and one named latest, both created within the same pipeline run timestamp.
+Task 3: Implement Automatic Deployment Triggered by Commits
+Problem statement: Extend the pipeline from Task 2 with a deploy stage that automatically pulls the newly pushed image from Docker Hub and runs it as a named container on the EC2 instance whenever a commit lands on main, replacing any previously running instance of that container without downtime gaps longer than five seconds, and verifies the newly started container is healthy before the pipeline job exits successfully.
+
+Constraints:
+
+The deploy stage must use a GitLab CI/CD environment block (a named logical target that GitLab tracks for deployment history) named production.
+If a container with the same name is already running, the stage must stop and remove it before starting the replacement; the stage must not fail if no prior container exists.
+The stage must perform a post-deployment health check by querying the /health endpoint of the newly started container from within the CI job and asserting an HTTP 200 response; if the check fails, the stage must exit with a non-zero code so GitLab marks the deployment as failed.
+The deploy stage must trigger automatically on every passing pipeline for main â no manual trigger.
+Acceptance criteria:
+
+After two consecutive commits to main, the GitLab Deployments view under CI/CD shows two distinct deployment entries for the production environment, each linked to its respective commit SHA, confirming the pipeline replaced the running container on each push.
+After the second deployment completes, running docker ps on the EC2 instance shows exactly one container using the application image, its STATUS column contains healthy or Up, and curl -fsSL http://localhost:8080/health returns a JSON body with an HTTP 200 status code from the terminal on the EC2 instance.
+Expected Outcomes
+A GitLab repository whose main branch is protected by a fully automated three-stage CI/CD pipeline that builds, tests, pushes, and deploys a Docker-containerized Node.js application on every commit without manual steps.
+A Docker Hub repository containing versioned image tags that correspond one-to-one with GitLab pipeline runs, providing a traceable artifact history.
+Conclusion
+This lab required you to integrate three independent systems â GitLab CI/CD, Docker, and Docker Hub â into a single automated delivery pipeline entirely from scratch. The core challenge was not writing application code but designing the pipeline contract: what each stage must guarantee before the next stage is allowed to run, and how credentials flow securely through the system without ever touching version control. These patterns â stage gating, artifact promotion, and secret injection â are the foundation of production-grade container delivery workflows.
