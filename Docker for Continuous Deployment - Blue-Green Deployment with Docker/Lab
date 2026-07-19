@@ -1,0 +1,95 @@
+Blue-Green Deployment with Docker and NGINX
+Objectives
+Design and implement a zero-downtime blue-green deployment system using Docker containers and NGINX as a traffic router
+Build an automated deployment pipeline that validates container health before switching live traffic between environments
+Simulate and recover from deployment failures using scripted rollback logic
+Prerequisites
+Comfort with Linux command-line operations including file editing, process management, and shell scripting
+Conceptual understanding of HTTP proxying, container networking, and deployment strategies
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, and supporting utilities
+Install Docker Engine from the official Docker apt repository, then install Docker Compose v2 as a CLI plugin, and finally install curl, jq, and nodejs with npm from the Ubuntu package index.
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release jq nodejs npm
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+If the gpg command fails with "File exists", run: sudo rm /etc/apt/keyrings/docker.gpg and retry. Official guide: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+Troubleshoot this step:
+
+Error seen: E: Package 'docker-ce' has no installation candidate â the sources list file is malformed or the apt cache was not refreshed.
+Recovery: Run cat /etc/apt/sources.list.d/docker.list and confirm it is a single unbroken line with no backslashes; delete and recreate the file if it is not, then re-run sudo apt-get update -y.
+Official guide: https://docs.docker.com/engine/install/ubuntu/
+Step 1.2 â Confirm every tool responds correctly
+Run each verification command below and confirm the output matches the expected result on the same line.
+
+docker version --format '{{.Server.Version}}'
+# Expected: a version string such as 26.1.4 â any version is acceptable
+
+docker compose version
+# Expected: Docker Compose version v2.x.x
+
+node --version
+# Expected: v18.x.x or higher
+
+jq --version
+# Expected: jq-1.6 or higher
+
+curl --version | head -1
+# Expected: curl 7.x.x or higher
+Confirmation: All five commands return version strings without errors. If docker version returns a permission error, the newgrp docker command above did not take effect; log out and log back in, then retry.
+
+Task 2: Build the Blue-Green Container Infrastructure
+Problem Statement
+Design and implement a containerised application stack in which two independent versions of a web service â called "blue" (version 1.0) and "green" (version 2.0) â run simultaneously as Docker containers on an isolated bridge network. An NGINX container on the same network acts as the sole public entry point on port 80. The NGINX configuration must be swappable at runtime without restarting the NGINX container, so that all traffic can be redirected from one application version to the other in under five seconds.
+
+Each application version must expose:
+
+GET / returning a JSON body that includes at minimum the fields version, environment, and timestamp
+GET /health returning a JSON body with a status field set to "healthy" and an uptime field in seconds
+You may implement the application in any language or framework. Both versions must be built from a Dockerfile you write. The two application containers must not be reachable directly from the public internet â only the NGINX container exposes a host port.
+
+Acceptance Criteria
+Running curl -s http://localhost/ returns a JSON response whose version field equals "blue" when NGINX is configured to route to the blue container, and equals "green" after the NGINX configuration is swapped and reloaded â with no NGINX container restart required and the switch completing within five seconds of the reload command.
+
+Running curl -s http://localhost:3001/health and curl -s http://localhost:3002/health both return HTTP 200 with a JSON body containing "status": "healthy" â confirming the application containers are reachable on their dedicated internal ports for diagnostic purposes while remaining inaccessible from port 80 except through NGINX.
+
+Task 3: Implement an Automated Deployment Pipeline with Rollback
+Problem Statement
+Design and implement a shell-script-based deployment pipeline that treats the two environments as alternating active and standby slots. The pipeline must determine which environment is currently active, deploy a new build to the standby slot, validate the standby slot's health before touching live traffic, switch NGINX routing to the newly validated slot, and automatically roll back to the previously active slot if any post-switch health check fails.
+
+The pipeline must be driven by a single entry-point script that accepts the following subcommands:
+
+deploy â build the standby environment, run health checks, switch traffic, then stop the previously active environment
+rollback â switch traffic back to the environment that was active before the last deploy call
+status â print which environment is currently active and the health state of both containers
+canary <percentage> â send the specified integer percentage of requests to the standby environment and the remainder to the active environment by adjusting NGINX upstream weights, without fully switching traffic
+The pipeline must persist the identity of the currently active environment across script invocations using a plain file on disk. Health checks must poll the target container's /health endpoint on a retry loop with a configurable timeout before declaring success or failure. The canary subcommand must reload NGINX without a container restart.
+
+To validate the rollback path, your submission must include a documented test run in which you: deploy to the standby slot, manually stop the newly active container to simulate a post-switch failure, trigger rollback, and confirm traffic returns to the previously active slot.
+
+Acceptance Criteria
+Executing ./pipeline.sh deploy followed immediately by ./pipeline.sh status prints the name of the newly active environment and shows both containers' health states; executing ./pipeline.sh deploy a second time switches back to the original environment â confirming the pipeline alternates slots correctly across successive deployments.
+
+Executing ./pipeline.sh canary 30 causes a sample of 30 sequential requests to http://localhost/ to return the standby environment's version value approximately 30 percent of the time and the active environment's value approximately 70 percent of the time, with the distribution verified by a loop that counts responses and prints the totals; executing ./pipeline.sh rollback immediately after returns 100 percent of requests to the active environment.
+
+Expected Outcomes
+A fully operational blue-green deployment system in which live traffic can be switched between two independently running application versions in under five seconds with no downtime to the NGINX entry point.
+A single-script pipeline that automates deployment, canary traffic splitting, health-gated cutover, and rollback â demonstrating the core mechanics used in production continuous-delivery systems.
+Conclusion
+This lab required you to design a zero-downtime deployment architecture from first principles, making every structural and scripting decision yourself. The blue-green pattern you implemented here is the foundation of production deployment systems used at scale, where the cost of downtime makes in-place upgrades unacceptable. Extend this work by replacing the shell-script pipeline with a declarative CI/CD tool such as GitHub Actions or Jenkins, and by adding automated smoke tests that run against the standby slot before any traffic switch is permitted.
