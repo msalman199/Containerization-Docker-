@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  web1:
+    image: nginx:alpine
+    networks:
+      app-network:
+        aliases:
+          - webserver
+          - frontend
+          - www
+    volumes:
+      - ./web1.html:/usr/share/nginx/html/index.html
+
+  web2:
+    image: nginx:alpine
+    networks:
+      app-network:
+        aliases:
+          - webserver
+          - frontend
+          - www
+    volumes:
+      - ./web2.html:/usr/share/nginx/html/index.html
+
+  web3:
+    image: nginx:alpine
+    networks:
+      app-network:
+        aliases:
+          - webserver
+          - frontend
+          - www
+    volumes:
+      - ./web3.html:/usr/share/nginx/html/index.html
+
+  api:
+    image: node:alpine
+    networks:
+      app-network:
+        aliases:
+          - api-server
+          - backend
+    command: >
+      sh -c "
+        npm init -y &&
+        npm install express &&
+        node -e \"
+          const express = require('express');
+          const app = express();
+          app.get('/', (req, res) => {
+            res.json({
+              message: 'API Server',
+              hostname: require('os').hostname(),
+              aliases: ['api-server', 'backend']
+            });
+          });
+          app.listen(3000, () => console.log('API running'));
+        \"
+      "
+
+  client:
+    image: alpine:latest
+    networks:
+      - app-network
+    command: sleep 3600
+    depends_on:
+      - web1
+      - web2
+      - web3
+      - api
+
+networks:
+  app-network:
+    driver: bridge
