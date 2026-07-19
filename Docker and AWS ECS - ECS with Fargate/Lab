@@ -1,0 +1,478 @@
+ Serverless Container Orchestration with Amazon ECS Fargate
+Objectives
+Design and deploy a production-grade containerized Node.js service to Amazon ECS using the Fargate launch type (a serverless compute engine that removes the need to manage EC2 instances)
+Implement Application Auto Scaling policies driven by CloudWatch metrics to maintain service availability under variable load
+Construct a CloudWatch observability stack â dashboards, alarms, and Log Insights queries â that surfaces container-level health signals
+Prerequisites
+Comfort with Linux command-line operations including file editing, environment variables, and shell scripting
+Conceptual understanding of Docker image layering, container networking, and HTTP request/response cycles
+Familiarity with AWS IAM concepts: roles, trust policies, and managed policies
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Environment Setup â Install and Verify All Required Tools
+Your instance has no pre-installed tooling. You must install Docker Engine, the AWS CLI v2, and supporting utilities, then verify each before proceeding.
+
+Step 1.1: Install Docker Engine and the AWS CLI v2
+Install Docker Engine from Docker's official apt repository. The keyring approach below pins the repository to a verified GPG key so future apt upgrade runs pull only authenticated packages.
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+sudo install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+Error seen: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the file contains a literal backslash or newline artifact.
+Recovery: cat /etc/apt/sources.list.d/docker.list â the file must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate using the heredoc above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+Now install the AWS CLI v2:
+
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+Official guide if the URL above changes: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+
+sudo apt-get install -y unzip
+unzip /tmp/awscliv2.zip -d /tmp/awscliv2-extracted
+sudo /tmp/awscliv2-extracted/aws/install
+Troubleshoot this step:
+
+Error seen: curl: (22) The requested URL returned error: 403 or a file named awscliv2.zip that is actually an HTML error page (unzip will report End-of-central-directory signature not found).
+Recovery: Run file /tmp/awscliv2.zip â if it reports HTML document rather than Zip archive data, the download URL has changed; retrieve the current URL from the official guide below.
+Official reference: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+Step 1.2: Configure AWS CLI and Verify All Tools
+Configure the AWS CLI with the credentials provided in your Al Nafi lab portal. The CLI stores these in ~/.aws/credentials and uses them for every subsequent API call.
+
+aws configure
+When prompted, enter:
+
+AWS Access Key ID â from your lab portal
+AWS Secret Access Key â from your lab portal
+Default region name â us-east-1
+Default output format â json
+Verify every tool is functional before continuing:
+
+docker run --rm hello-world
+aws sts get-caller-identity
+aws ecs list-clusters
+Confirmation: docker run --rm hello-world prints Hello from Docker!; aws sts get-caller-identity returns a JSON object containing your Account ID and Arn; aws ecs list-clusters returns {"clusterArns": []} (empty is correct at this stage).
+
+Task 2: Build a Production Container Image and Publish It to ECR
+Amazon Elastic Container Registry (ECR) is a fully managed Docker registry. ECS Fargate pulls your image from ECR at task launch time; the image must be present in ECR before you register a task definition.
+
+Step 2.1: Implement the Application and Dockerfile
+Design a stateless Node.js HTTP service that satisfies all of the following constraints:
+
+Exposes three routes: GET / returns a JSON payload including the container hostname; GET /health returns HTTP 200 with a JSON body containing status, uptime, and timestamp; GET /metrics returns process.memoryUsage() and process.cpuUsage() as JSON
+Runs as a non-root OS user inside the container
+Declares a Dockerfile HEALTHCHECK instruction that polls GET /health every 30 seconds with a 3-second timeout and 3 retries
+Uses a multi-stage or minimal base image (Alpine-based Node 18 is acceptable) to keep the final image under 150 MB
+Accepts the listening port from the environment variable PORT, defaulting to 3000 if unset
+Your application must conform to this interface contract:
+
+interface HealthResponse {
+  status: "healthy" | "degraded";
+  uptime: number;          // seconds, from process.uptime()
+  timestamp: string;       // ISO 8601
+}
+
+interface RootResponse {
+  message: string;
+  container_id: string;    // os.hostname()
+  timestamp: string;
+}
+
+interface MetricsResponse {
+  memory: NodeJS.MemoryUsage;
+  cpu: NodeJS.CpuUsage;
+}
+Build the image locally and confirm it starts cleanly:
+
+docker build -t fargate-web-app:v1 .
+docker run --rm -d -p 3000:3000 --name test-app fargate-web-app:v1
+sleep 5
+curl -sf http://localhost:3000/health
+docker stop test-app
+Confirmation: curl returns a JSON body with "status": "healthy" and a non-zero uptime.
+
+Step 2.2: Create an ECR Repository, Tag, and Push the Image
+Create the ECR repository, authenticate Docker to it, and push two tags (latest and v1). All commands below are parameterised so they run without editing.
+
+REGION="us-east-1"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+aws ecr create-repository \
+  --repository-name fargate-web-app \
+  --image-scanning-configuration scanOnPush=true \
+  --region "$REGION"
+
+REPO_URI=$(aws ecr describe-repositories \
+  --repository-names fargate-web-app \
+  --query 'repositories[0].repositoryUri' \
+  --output text)
+
+echo "REPO_URI=$REPO_URI"
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin "$REPO_URI"
+
+docker tag fargate-web-app:v1 "$REPO_URI:latest"
+docker tag fargate-web-app:v1 "$REPO_URI:v1"
+
+docker push "$REPO_URI:latest"
+docker push "$REPO_URI:v1"
+
+aws ecr list-images --repository-name fargate-web-app --region "$REGION"
+Confirmation: aws ecr list-images returns two entries with imageTag values latest and v1.
+
+Troubleshoot this step:
+
+Error seen: no basic auth credentials or authorization token has expired when pushing.
+Recovery: Re-run the aws ecr get-login-password ... | docker login ... command â ECR tokens expire after 12 hours; you must re-authenticate before each push session.
+Official reference: https://docs.aws.amazon.com/AmazonECR/latest/userguide/registry_auth.html
+Task 3: Deploy, Scale, and Observe the Service on ECS Fargate
+Step 3.1: Provision IAM Roles, the ECS Cluster, and the Fargate Task Definition
+ECS Fargate requires two distinct IAM roles: the task execution role (used by the Fargate control plane to pull images from ECR and write logs to CloudWatch) and the task role (assumed by your application code at runtime). Create both, then register a task definition that references them.
+
+Your task definition must satisfy these architectural constraints:
+
+Launch type: FARGATE; network mode: awsvpc (each task receives its own elastic network interface)
+CPU: 256 units (0.25 vCPU); memory: 512 MiB â sufficient for the sample workload
+Log driver: awslogs writing to the log group /ecs/fargate-web-app with a 7-day retention policy
+Container health check mirrors the Dockerfile HEALTHCHECK (polls /health, 30-second interval, 5-second timeout, 3 retries, 60-second start period)
+Environment variable NODE_ENV=production and PORT=3000 injected at the task level
+REGION="us-east-1"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REPO_URI=$(aws ecr describe-repositories \
+  --repository-names fargate-web-app \
+  --query 'repositories[0].repositoryUri' \
+  --output text)
+
+# Create the CloudWatch log group before registering the task definition
+aws logs create-log-group \
+  --log-group-name /ecs/fargate-web-app \
+  --region "$REGION"
+
+aws logs put-retention-policy \
+  --log-group-name /ecs/fargate-web-app \
+  --retention-in-days 7
+Create the task execution role trust policy and attach the AWS-managed policy:
+
+cat > /tmp/ecs-trust-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+aws iam create-role \
+  --role-name ecsTaskExecutionRole \
+  --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+
+aws iam attach-role-policy \
+  --role-name ecsTaskExecutionRole \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+aws iam create-role \
+  --role-name ecsTaskRole \
+  --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+Create and attach a least-privilege CloudWatch Logs policy to the task role:
+
+cat > /tmp/cw-logs-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/ecs/fargate-web-app:*"
+    }
+  ]
+}
+EOF
+
+aws iam create-policy \
+  --policy-name ECSTaskCloudWatchLogsPolicy \
+  --policy-document file:///tmp/cw-logs-policy.json
+
+aws iam attach-role-policy \
+  --role-name ecsTaskRole \
+  --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/ECSTaskCloudWatchLogsPolicy"
+Create the ECS cluster and register the task definition. The heredoc below writes the full JSON in one pass with no line-continuation characters:
+
+aws ecs create-cluster \
+  --cluster-name fargate-lab-cluster \
+  --capacity-providers FARGATE \
+  --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
+  --region "$REGION"
+cat > /tmp/task-definition.json <<EOF
+{
+  "family": "fargate-web-app-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "web-app",
+      "image": "${REPO_URI}:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 3000, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "PORT",     "value": "3000" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/ecs/fargate-web-app",
+          "awslogs-region":        "${REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command":     ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"],
+        "interval":    30,
+        "timeout":     5,
+        "retries":     3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
+EOF
+
+aws ecs register-task-definition \
+  --cli-input-json file:///tmp/task-definition.json \
+  --region "$REGION"
+Confirmation: aws ecs describe-task-definition --task-definition fargate-web-app-task returns a definition with status: ACTIVE.
+
+Step 3.2: Launch an ECS Service with Auto Scaling and CloudWatch Observability
+Deploy the task as an ECS service (a long-running managed group of tasks) rather than a one-off run-task call, so that Fargate automatically replaces failed tasks and Application Auto Scaling can adjust the desired count.
+
+Networking constraints:
+
+Use the default VPC and any one of its public subnets
+Create a dedicated security group that allows inbound TCP on port 3000 from 0.0.0.0/0 and unrestricted outbound (required for ECR and CloudWatch API calls)
+Set assignPublicIp=ENABLED so tasks are reachable without a NAT gateway
+VPC_ID=$(aws ec2 describe-vpcs \
+  --filters "Name=isDefault,Values=true" \
+  --query 'Vpcs[0].VpcId' \
+  --output text)
+
+SUBNET_ID=$(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=${VPC_ID}" \
+  --query 'Subnets[0].SubnetId' \
+  --output text)
+
+SG_ID=$(aws ec2 create-security-group \
+  --group-name fargate-web-app-sg \
+  --description "Fargate web app inbound 3000" \
+  --vpc-id "$VPC_ID" \
+  --query 'GroupId' \
+  --output text)
+
+aws ec2 authorize-security-group-ingress \
+  --group-id "$SG_ID" \
+  --protocol tcp \
+  --port 3000 \
+  --cidr 0.0.0.0/0
+
+echo "SG_ID=$SG_ID  SUBNET_ID=$SUBNET_ID"
+Create the ECS service with a desired count of 2 (so you can observe load distribution):
+
+cat > /tmp/service-definition.json <<EOF
+{
+  "serviceName":    "fargate-web-app-service",
+  "cluster":        "fargate-lab-cluster",
+  "taskDefinition": "fargate-web-app-task",
+  "desiredCount":   2,
+  "launchType":     "FARGATE",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets":        ["${SUBNET_ID}"],
+      "securityGroups": ["${SG_ID}"],
+      "assignPublicIp": "ENABLED"
+    }
+  },
+  "deploymentConfiguration": {
+    "maximumPercent":        200,
+    "minimumHealthyPercent": 50
+  },
+  "healthCheckGracePeriodSeconds": 60
+}
+EOF
+
+aws ecs create-service \
+  --cli-input-json file:///tmp/service-definition.json \
+  --region "$REGION"
+
+aws ecs wait services-stable \
+  --cluster fargate-lab-cluster \
+  --services fargate-web-app-service \
+  --region "$REGION"
+Register the service as an Application Auto Scaling target and attach a CPU-based target-tracking policy (target: 70% average CPU, scale-out cooldown 300 s, scale-in cooldown 300 s) and a memory-based target-tracking policy (target: 80% average memory). Minimum capacity: 1 task; maximum capacity: 6 tasks.
+
+aws application-autoscaling register-scalable-target \
+  --service-namespace ecs \
+  --resource-id "service/fargate-lab-cluster/fargate-web-app-service" \
+  --scalable-dimension ecs:service:DesiredCount \
+  --min-capacity 1 \
+  --max-capacity 6
+cat > /tmp/cpu-scaling-policy.json <<'EOF'
+{
+  "PolicyName":        "cpu-target-tracking",
+  "ServiceNamespace":  "ecs",
+  "ResourceId":        "service/fargate-lab-cluster/fargate-web-app-service",
+  "ScalableDimension": "ecs:service:DesiredCount",
+  "PolicyType":        "TargetTrackingScaling",
+  "TargetTrackingScalingPolicyConfiguration": {
+    "TargetValue": 70.0,
+    "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+    },
+    "ScaleOutCooldown": 300,
+    "ScaleInCooldown":  300
+  }
+}
+EOF
+
+aws application-autoscaling put-scaling-policy \
+  --cli-input-json file:///tmp/cpu-scaling-policy.json
+cat > /tmp/mem-scaling-policy.json <<'EOF'
+{
+  "PolicyName":        "memory-target-tracking",
+  "ServiceNamespace":  "ecs",
+  "ResourceId":        "service/fargate-lab-cluster/fargate-web-app-service",
+  "ScalableDimension": "ecs:service:DesiredCount",
+  "PolicyType":        "TargetTrackingScaling",
+  "TargetTrackingScalingPolicyConfiguration": {
+    "TargetValue": 80.0,
+    "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "ECSServiceAverageMemoryUtilization"
+    },
+    "ScaleOutCooldown": 300,
+    "ScaleInCooldown":  300
+  }
+}
+EOF
+
+aws application-autoscaling put-scaling-policy \
+  --cli-input-json file:///tmp/mem-scaling-policy.json
+Create two CloudWatch alarms â one for CPU above 80% and one for memory above 85% â each evaluated over two consecutive 5-minute periods. Then create a CloudWatch dashboard named ECS-Fargate-Lab that plots CPUUtilization, MemoryUtilization, RunningTaskCount, and DesiredCount for the service.
+
+Finally, retrieve the public IP of one running task and confirm the application responds:
+
+TASK_ARN=$(aws ecs list-tasks \
+  --cluster fargate-lab-cluster \
+  --service-name fargate-web-app-service \
+  --query 'taskArns[0]' \
+  --output text)
+
+PUBLIC_IP=$(aws ecs describe-tasks \
+  --cluster fargate-lab-cluster \
+  --tasks "$TASK_ARN" \
+  --query 'tasks[0].attachments[0].details[?name==`publicIPv4Address`].value' \
+  --output text)
+
+echo "Task public IP: $PUBLIC_IP"
+curl -sf "http://${PUBLIC_IP}:3000/health"
+curl -sf "http://${PUBLIC_IP}:3000/"
+Confirmation: Both curl calls return valid JSON; aws ecs describe-services --cluster fargate-lab-cluster --services fargate-web-app-service shows runningCount: 2 and desiredCount: 2; the CloudWatch dashboard is visible in the AWS Console under CloudWatch > Dashboards.
+
+Code
+// Application route contract â implement all three handlers
+interface HealthResponse {
+  status: "healthy" | "degraded";
+  uptime: number;       // seconds
+  timestamp: string;    // ISO 8601
+}
+
+interface RootResponse {
+  message: string;
+  container_id: string; // os.hostname()
+  timestamp: string;
+}
+
+interface MetricsResponse {
+  memory: {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external: number;
+  };
+  cpu: {
+    user: number;
+    system: number;
+  };
+}
+
+// ECS task definition shape â your JSON must satisfy this structure
+interface ContainerDefinition {
+  name: string;
+  image: string;
+  essential: boolean;
+  portMappings: Array<{ containerPort: number; protocol: "tcp" | "udp" }>;
+  environment: Array<{ name: string; value: string }>;
+  logConfiguration: {
+    logDriver: "awslogs";
+    options: {
+      "awslogs-group": string;
+      "awslogs-region": string;
+      "awslogs-stream-prefix": string;
+    };
+  };
+  healthCheck: {
+    command: string[];
+    interval: number;
+    timeout: number;
+    retries: number;
+    startPeriod: number;
+  };
+}
+
+interface TaskDefinition {
+  family: string;
+  networkMode: "awsvpc";
+  requiresCompatibilities: ["FARGATE"];
+  cpu: string;
+  memory: string;
+  executionRoleArn: string;
+  taskRoleArn: string;
+  containerDefinitions: ContainerDefinition[];
+}
+Expected Outcomes
+Two Fargate tasks run concurrently in the fargate-lab-cluster, each responding to HTTP requests on port 3000 with the correct JSON payloads, and CloudWatch Log Insights shows live container stdout entries under /ecs/fargate-web-app.
+Application Auto Scaling policies are active and the CloudWatch dashboard displays real-time CPUUtilization and MemoryUtilization metrics for the ECS service.
+Troubleshooting
+If a task transitions to STOPPED immediately after launch, what specific fields in aws ecs describe-tasks and in the CloudWatch log stream would tell you whether the failure originated in image pull, container startup, or the health check â and how would you distinguish between them?
+If curl to the task's public IP times out but the task shows RUNNING and HEALTHY in ECS, which layer of the network path (security group rules, subnet route table, task ENI assignment, or application bind address) would you inspect first, and what command would you run to confirm or rule out each layer?
+Conclusion
+This lab demonstrated how ECS Fargate decouples container orchestration from infrastructure management: you defined compute requirements in a task definition and Fargate provisioned, networked, and monitored the underlying capacity invisibly. Pairing Fargate with Application Auto Scaling and CloudWatch produces a self-healing, observable service that adjusts capacity in response to real workload signals rather than static thresholds. These patterns â immutable images in ECR, least-privilege IAM roles, target-tracking scaling, and structured log routing â form the operational baseline for production-grade serverless container workloads on AWS.
