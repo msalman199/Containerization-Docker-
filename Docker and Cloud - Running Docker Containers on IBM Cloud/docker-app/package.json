@@ -1,0 +1,12 @@
+{
+  "name": "docker-cloud-app",
+  "version": "1.0.0",
+  "description": "Sample app for Docker on IBM Cloud",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
