@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  app-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=test
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  unit-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: npm run test:unit
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+  integration-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: npm run test:integration
+    environment:
+      - TEST_URL=http://app-test:3000
+    depends_on:
+      app-test:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
