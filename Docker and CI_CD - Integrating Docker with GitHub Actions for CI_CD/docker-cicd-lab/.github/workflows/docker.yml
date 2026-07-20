@@ -97,3 +97,37 @@ jobs:
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
+
+
+  # Job 4: Deploy to staging (simulation)
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, security-scan]
+    name: Deploy to Staging
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to staging environment
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
+        echo "Deployment would happen here in a real scenario"
+        
+        # Simulate deployment verification
+        echo "✅ Deployment verification passed"
+        echo "🌐 Application available at: https://staging.example.com"
+        
+    - name: Run smoke tests
+      run: |
+        echo "🧪 Running smoke tests..."
+        # In a real scenario, you would run actual smoke tests here
+        echo "✅ Smoke tests passed"
+        
+    - name: Notify deployment success
+      run: |
+        echo "📧 Sending deployment notification..."
+        echo "✅ Deployment to staging completed successfully"
+        
