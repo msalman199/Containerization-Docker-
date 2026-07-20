@@ -1,0 +1,88 @@
+Docker Multi-Tenant Application Isolation and Orchestration
+Objectives
+Design and deploy a containerized multi-tenant platform with enforced network isolation between tenants using custom Docker bridge networks
+Implement per-tenant CPU and memory resource quotas using Docker runtime constraints and verify enforcement under load
+Orchestrate the full multi-tenant stack â applications, shared services, and a reverse proxy â using a single Docker Compose manifest with health checks
+Prerequisites
+Comfort navigating and editing files on a Linux command line, including writing shell scripts and reading command output
+Familiarity with HTTP request/response concepts and basic networking terms such as port, IP address, and DNS resolution
+Understanding of YAML indentation rules sufficient to write a valid configuration file from scratch
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Container Toolchain
+Step 1.1 â Install Docker Engine and Docker Compose Plugin
+Install Docker Engine from the official Docker apt repository, then install the Compose plugin. The Docker apt repository is separate from Ubuntu's default package index and must be added manually before any Docker packages can be installed.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official installation guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the file contains a literal backslash or a broken line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo usermod -aG docker $USER
+newgrp docker
+Step 1.2 â Verify All Tools Are Operational
+Run each verification command and confirm the expected output before proceeding. A version string printed to stdout confirms the tool is installed and on the PATH; any error message means the installation did not complete.
+
+docker version
+docker compose version
+docker network ls
+docker info | grep -E "Server Version|Cgroup Driver"
+You should observe: a Docker server version of 24.x or newer, a Compose version of v2.x or newer, the default bridge and host networks listed, and a cgroup driver of either cgroupfs or systemd. If docker version prints a permission error, the newgrp docker command above did not take effect â log out and back in, then retry.
+
+Task 2: Design and Deploy an Isolated Multi-Tenant Container Platform
+Problem Statement
+Design and implement a containerized platform that runs three independent tenant applications simultaneously. Each tenant must be completely isolated at the network layer â no tenant container may reach another tenant's container by name or IP address. All three applications must be reachable from the host machine on distinct ports, and a shared PostgreSQL database must be accessible only to tenants that are explicitly granted access to the shared services network.
+
+You choose the application runtime for each tenant (Python, Node.js, Go, or any language available in a public Docker base image). Each application must expose at minimum a root endpoint (/) returning a JSON payload that identifies the tenant, and a /health endpoint returning {"status":"healthy"}. You must write a Dockerfile for each tenant from scratch â no pre-built application images.
+
+Constraints:
+
+Tenant networks must be named tenant-a-net, tenant-b-net, and tenant-c-net
+The shared database network must be named shared-net
+No tenant container may be attached to another tenant's named network
+All containers must be started with --restart unless-stopped
+The shared PostgreSQL container must be attached only to shared-net; at least one tenant container must also be attached to shared-net to demonstrate selective access
+Acceptance Criterion 1: Running docker network inspect tenant-a-net, docker network inspect tenant-b-net, and docker network inspect tenant-c-net each shows exactly one tenant application container in the Containers field, and no tenant container appears in more than one tenant network. Running docker exec <tenant-a-container> ping -c 2 <tenant-b-container-name> must exit with a non-zero code and print a name resolution or network unreachable error, confirming cross-tenant isolation.
+
+Acceptance Criterion 2: Running curl -sf http://localhost:8081, curl -sf http://localhost:8082, and curl -sf http://localhost:8083 each returns a JSON body containing a tenant key with a distinct value, and curl -sf http://localhost:8081/health returns {"status":"healthy"} with HTTP 200. All three commands must succeed without any Connection refused error.
+
+Task 3: Enforce Resource Quotas and Orchestrate with Docker Compose
+Problem Statement
+Redesign the entire multi-tenant platform as a single Docker Compose manifest. The manifest must define all tenant applications, the shared PostgreSQL database, and an Nginx reverse proxy that routes incoming requests to the correct tenant backend based on URL path prefix (/tenant-a, /tenant-b, /tenant-c). You must write the Nginx configuration from scratch.
+
+Every service in the manifest must declare explicit CPU and memory limits. The limits must reflect a realistic tiered model: the database receives the most resources, the reverse proxy the least, and the three tenant applications receive intermediate values that differ from one another by at least one resource dimension. All services must include a healthcheck block that Docker can use to determine container readiness.
+
+Constraints:
+
+The entire stack must start with a single docker compose up -d command issued from the project root
+Resource limits must be declared using the deploy.resources.limits block (Compose v3.8 or later syntax)
+The Nginx reverse proxy must be the only container with port 80 exposed to the host; tenant application containers must not publish any host port in the Compose manifest
+The PostgreSQL container must use a named volume for data persistence; the volume must be declared in the top-level volumes block
+Health checks must use curl or pg_isready as appropriate â no CMD-SHELL with true or no-op commands
+Acceptance Criterion 1: After docker compose up -d, running docker compose ps shows all services in running state with health status healthy (not starting or unhealthy) within 90 seconds. Running docker compose exec shared-database pg_isready -U dbadmin must print accepting connections. Running curl -sf http://localhost/tenant-a and curl -sf http://localhost/tenant-b and curl -sf http://localhost/tenant-c must each return the corresponding tenant's JSON response through the reverse proxy.
+
+Acceptance Criterion 2: Running docker inspect <tenant-a-service-container> --format '{{.HostConfig.Memory}}' returns a non-zero integer (confirming the memory limit is applied at the container runtime level, not only in the Compose file). Running docker inspect <database-container> --format '{{.HostConfig.Memory}}' returns a value strictly greater than the value returned for any tenant application container. Running docker compose down -v removes all containers and the named volume without error, and a subsequent docker volume ls shows no leftover volume from this project.
+
+Expected Outcomes
+A fully operational multi-tenant Docker environment in which network isolation between tenants is verifiable by failed cross-tenant ping attempts, resource quotas are confirmed by docker inspect output, and all services are reachable through the Nginx reverse proxy after a single docker compose up -d
+A reproducible project directory containing all Dockerfiles, application source files, the Nginx configuration, and the Docker Compose manifest, such that tearing down the stack with docker compose down -v and restarting it with docker compose up -d produces the same healthy state without manual intervention
+Conclusion
+This lab required you to reason about container isolation, resource governance, and service orchestration as interconnected design decisions rather than independent steps. The network isolation model you implemented mirrors production multi-tenant SaaS architectures where tenant data-plane separation is a hard security requirement. The Docker Compose manifest you produced is the foundation for adding secrets management, TLS termination, and centralized logging as the platform matures
