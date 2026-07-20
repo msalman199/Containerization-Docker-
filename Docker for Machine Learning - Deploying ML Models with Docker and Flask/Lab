@@ -1,0 +1,95 @@
+ Deploying Machine Learning Models with Docker and Flask
+Objectives
+Design and containerize a Flask-based REST API that serves predictions from a trained scikit-learn model
+Integrate a PostgreSQL database container to persist prediction requests and results
+Orchestrate multi-container ML infrastructure using Docker Compose with load balancing
+Prerequisites
+Comfort working in a Linux/Ubuntu terminal including file editing, directory navigation, and reading command output
+Familiarity with Python scripting and the concept of REST APIs (HTTP methods, JSON payloads, status codes)
+Basic understanding of what a trained machine learning model is and what inference means
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Environment
+Requirement 1
+Install Docker Engine, Docker Compose plugin, and Python 3 with pip on the Ubuntu instance, then confirm each tool is operational before proceeding.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release python3 python3-pip
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+Official installation reference if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the file contains a literal backslash or a broken line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc form shown above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+Verify the installation produces the following output before continuing:
+
+docker --version        # must print Docker version 24.x or higher
+docker compose version  # must print Docker Compose version v2.x or higher
+python3 --version       # must print Python 3.10 or higher
+pip3 --version          # must print pip 22.x or higher
+docker run --rm hello-world  # must print "Hello from Docker!"
+Requirement 2
+Install the Python libraries the ML service will depend on â scikit-learn, Flask, joblib, numpy, psycopg2-binary, and requests â into the system Python environment, then confirm each import succeeds in a non-interactive check.
+
+pip3 install scikit-learn flask joblib numpy psycopg2-binary requests
+
+python3 -c "
+import sklearn, flask, joblib, numpy, psycopg2, requests
+print('sklearn', sklearn.__version__)
+print('flask', flask.__version__)
+print('numpy', numpy.__version__)
+print('All imports successful')
+"
+Confirmation: every library name and version prints without an ImportError or ModuleNotFoundError.
+
+Task 2: Build and Containerize the ML Prediction Service
+Requirement 1
+Design and implement a complete ML prediction service from scratch. The service must: train an iris classification model using scikit-learn and persist it to disk; expose a Flask REST API with at minimum a /health endpoint (GET), a /predict endpoint (POST accepting a JSON body with a features key containing a list of four floats), and a /predictions/history endpoint (GET); and package the entire application in a Docker image built from a Dockerfile you write without using any pre-built application images beyond python:3.11-slim.
+
+Acceptance criteria:
+
+docker build -t ml-api:v1 . completes without error, and docker run --rm -p 5000:5000 ml-api:v1 starts the server; curl -s http://localhost:5000/health returns HTTP 200 with a JSON body containing a status field set to "healthy" and a model_loaded field set to true.
+curl -s -X POST http://localhost:5000/predict -H "Content-Type: application/json" -d '{"features":[5.1,3.5,1.4,0.2]}' returns HTTP 200 with a JSON body containing predicted_class (a non-empty string), prediction (an integer 0, 1, or 2), and probabilities (an object with three keys summing to 1.0 within floating-point tolerance); sending a body with fewer than four features must return HTTP 400.
+Requirement 2
+Extend the project to a multi-container architecture using a single docker-compose.yml file you author from scratch. The architecture must include: the ML API service (two replicas on distinct host ports), a PostgreSQL 15 container that initialises a predictions table on first start using an SQL init script you write, and an Nginx container acting as a round-robin load balancer across the two API replicas. The API must write every successful /predict call to the predictions table and serve stored records from /predictions/history.
+
+Acceptance criteria:
+
+docker compose up -d starts all four containers (postgres, two ml-api instances, nginx) with all showing healthy or running status in docker compose ps; curl -s http://localhost/health returns HTTP 200 through the Nginx proxy, and repeating the request ten times distributes traffic across both API containers as confirmed by differing container_id or hostname values in the response body.
+After sending five POST requests to http://localhost/predict with valid feature arrays, curl -s "http://localhost/predictions/history?limit=5" returns a JSON array of exactly five records each containing id, timestamp, features, predicted_class, and probabilities fields; connecting directly to PostgreSQL with docker exec -it <postgres-container> psql -U postgres -d ml_predictions -c "SELECT COUNT(*) FROM predictions;" returns a count of five or more.
+Task 3: Validate End-to-End Behaviour and Resilience
+Requirement 1
+Write a Python test script from scratch (no testing framework required â plain requests calls with assert statements are sufficient) that exercises the full API surface: health check, single prediction for each of the three iris classes using known representative feature vectors, a malformed request that must return 400, and prediction history retrieval. The script must exit with code 0 on full success and code 1 on any assertion failure, printing a clear pass or fail message for each test case.
+
+Acceptance criteria:
+
+Running python3 tests/test_api.py against the live Docker Compose stack exits with code 0 and prints a pass confirmation for every test case including the health check, all three class predictions, the 400-error case, and the history retrieval.
+The prediction for feature vector [5.1, 3.5, 1.4, 0.2] must resolve to "setosa", [6.2, 2.9, 4.3, 1.3] must resolve to "versicolor", and [7.3, 2.9, 6.3, 1.8] must resolve to "virginica" â these are deterministic given a fixed random seed in the model training script; if any class is wrong the script must print the actual vs expected value and exit with code 1.
+Requirement 2
+Demonstrate container resilience by stopping one of the two ML API containers while the stack is running, sending ten prediction requests through the Nginx load balancer, then restarting the stopped container and confirming the full stack recovers without data loss.
+
+Acceptance criteria:
+
+With one API container stopped, all ten curl -s -X POST http://localhost/predict requests return HTTP 200 (Nginx must route all traffic to the surviving replica); docker compose ps shows one container in a stopped or restarting state and one running.
+After docker compose start <stopped-service> the restarted container reaches a healthy state within 60 seconds confirmed by curl -s http://localhost:<direct-port>/health returning "model_loaded": true; docker exec into PostgreSQL confirms the total row count in predictions equals the sum of all requests sent before and after the outage with no gaps in the id sequence.
+Expected Outcomes
+A fully containerised ML inference stack runs on your EC2 instance with load balancing, database persistence, and automated health checks all verified by your own test script.
+You can stop, restart, and scale individual containers without losing prediction history or breaking the API surface exposed through Nginx.
+Conclusion
+This lab required you to design every component of a production-style ML deployment from scratch: model training and serialisation, a REST API, container images, database schema, orchestration, load balancing, and automated validation. The patterns you applied here â separating concerns across containers, persisting state in a dedicated data service, and routing traffic through a reverse proxy â are the same patterns used in real ML platform engineering. Extend this foundation by adding authentication, model versioning, or a monitoring sidecar as your next self-directed challenge.
