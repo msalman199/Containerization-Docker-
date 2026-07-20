@@ -344,3 +344,200 @@ pipeline {
         }
     }
 }
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_HUB_CREDENTIALS = credentials('docker-hub-credentials')
+        SONAR_TOKEN = credentials('sonarqube-token')
+        IMAGE_NAME = 'your-dockerhub-username/docker-jenkins-demo'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build Application') {
+            steps {
+                script {
+                    echo 'Building Node.js application...'
+                    sh 'npm install'
+                }
+            }
+        }
+        
+        stage('Unit Tests') {
+            steps {
+                script {
+                    echo 'Running unit tests in Docker container...'
+                    sh 'docker-compose -f docker-compose.test.yml run --rm unit-tests'
+                }
+            }
+        }
+        
+        stage('Static Code Analysis') {
+            steps {
+                script {
+                    echo 'Running SonarQube analysis...'
+                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                            sonar-scanner \
+                            -Dsonar.projectKey=docker-jenkins-demo \
+                            -Dsonar.sources=. \
+                            -Dsonar.exclusions=node_modules/**,tests/** \
+                            -Dsonar.host.url=http://localhost:9000 \
+                            -Dsonar.login=${SONAR_TOKEN}
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    echo 'Waiting for Quality Gate...'
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo 'Building Docker image...'
+                    def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                    docker.build("${IMAGE_NAME}:latest")
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo 'Scanning Docker image for vulnerabilities...'
+                    sh "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            steps {
+                script {
+                    echo 'Running integration tests...'
+                    sh 'docker-compose -f docker-compose.test.yml up -d app-test'
+                    sh 'sleep 30' // Wait for app to be ready
+                    sh 'docker-compose -f docker-compose.test.yml run --rm integration-tests'
+                }
+            }
+            post {
+                always {
+                    sh 'docker-compose -f docker-compose.test.yml down || true'
+                }
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                script {
+                    echo 'Pushing image to Docker Hub...'
+                    docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-credentials') {
+                        def image = docker.image("${IMAGE_NAME}:${IMAGE_TAG}")
+                        image.push()
+                        image.push('latest')
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            steps {
+                script {
+                    echo 'Deploying to staging environment...'
+                    sh './deploy.sh'
+                }
+            }
+        }
+        
+        stage('Smoke Tests') {
+            steps {
+                script {
+                    echo 'Running smoke tests on deployed application...'
+                    sh '''
+                        # Wait for deployment to complete
+                        sleep 20
+                        
+                        # Run smoke tests
+                        curl -f http://localhost/health
+                        curl -f http://localhost/ | grep "Hello from Docker"
+                        
+                        # Test response time
+                        response_time=$(curl -o /dev/null -s -w '%{time_total}' http://localhost/)
+                        echo "Response time: ${response_time}s"
+                        
+                        echo "Smoke tests passed!"
+                    '''
+                }
+            }
+        }
+        
+        stage('Performance Tests') {
+            steps {
+                script {
+                    echo 'Running performance tests...'
+                    sh '''
+                        # Install Apache Bench if not available
+                        which ab || sudo apt-get update && sudo apt-get install -y apache2-utils
+                        
+                        # Run performance test
+                        ab -n 100 -c 10 http://localhost/ > performance_results.txt
+                        cat performance_results.txt
+                        
+                        echo "Performance tests completed!"
+                    '''
+                }
+            }
+        }
+        
+        stage('Clean Up') {
+            steps {
+                script {
+                    echo 'Cleaning up local images...'
+                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+                    sh 'docker system prune -f'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline completed!'
+            archiveArtifacts artifacts: 'performance_results.txt', allowEmptyArchive: true
+        }
+        success {
+            echo 'Pipeline succeeded!'
+            echo 'Application deployed and tested successfully!'
+            emailext (
+                subject: "SUCCESS: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: "Good news! The pipeline succeeded. Application is deployed and running.",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+        failure {
+            echo 'Pipeline failed!'
+            sh 'docker-compose logs || true'
+            emailext (
+                subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                body: "Bad news! The pipeline failed. Please check the logs.",
+                to: "${env.CHANGE_AUTHOR_EMAIL}"
+            )
+        }
+    }
+}
