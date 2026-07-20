@@ -1,0 +1,116 @@
+Docker for Continuous Testing â Selenium Tests in Containerized Environments
+Objectives
+Design and deploy a containerized Selenium Grid (a distributed browser automation infrastructure) using Docker and Docker Compose from scratch
+Implement a Python pytest test suite that executes against the containerized grid and produces structured HTML and JUnit XML reports
+Integrate the containerized test pipeline into a Jenkins CI server so that every code push triggers a full Selenium test run automatically
+Prerequisites
+Comfort navigating and editing files on a Linux/Ubuntu command line
+Basic Python programming knowledge, including writing functions and using third-party libraries
+Familiarity with the concept of automated software testing and what a browser automation tool does
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Complete Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, Python 3, pip, and Git
+Install Docker Engine using the official apt repository, then install the remaining tools from Ubuntu's package index.
+
+# Remove any conflicting legacy Docker packages
+sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+
+# Add Docker's official GPG key and repository
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Official current guide if this URL changes: https://docs.docker.com/engine/install/ubuntu/
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Allow the current user to run Docker without sudo
+sudo usermod -aG docker "$USER"
+newgrp docker <<'GROUPEOF'
+echo "Docker group active"
+GROUPEOF
+Troubleshoot this step:
+
+Error seen: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â the file contains a literal backslash or is split across lines.
+Recovery: cat /etc/apt/sources.list.d/docker.list â the file must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the tee heredoc block above.
+Official docs: https://docs.docker.com/engine/install/ubuntu/
+# Install Python 3, pip, and Git
+sudo apt-get install -y python3 python3-pip python3-venv git
+
+# Verify every tool is present
+docker --version
+docker compose version
+python3 --version
+pip3 --version
+git --version
+Confirmation: All five version strings print without error. If docker --version returns "permission denied", log out and back in so the group membership takes effect, then re-run.
+
+Step 1.2 â Pull the Selenium Standalone Chrome image and confirm it runs
+Pull the official Selenium image and start a temporary container to confirm the WebDriver endpoint responds.
+
+# Pull the image â this may take 2-3 minutes on first run
+docker pull selenium/standalone-chrome:4.18.1
+
+# Start a short-lived container to verify the endpoint
+docker run -d \
+  --name sel-verify \
+  -p 4444:4444 \
+  --shm-size=2g \
+  selenium/standalone-chrome:4.18.1
+
+# Wait for the node to register (the grid needs ~10 seconds to initialise)
+sleep 15
+
+# Query the grid status endpoint
+curl -fsSL http://localhost:4444/status
+
+# Remove the verification container
+docker stop sel-verify && docker rm sel-verify
+Troubleshoot this step:
+
+Error seen: curl: (7) Failed to connect to localhost port 4444: Connection refused â the container has not finished starting.
+Recovery: Run docker logs sel-verify to check startup progress; if the log shows Started Selenium Standalone, wait another 10 seconds and retry the curl command.
+Official docs: https://github.com/SeleniumHQ/docker-selenium
+Confirmation: The curl command returns a JSON object containing "ready": true and a "nodes" array with at least one entry listing "browserName": "chrome".
+
+Task 2: Design and Deploy a Containerised Selenium Test Suite
+Problem Statement
+Design and implement a self-contained testing system that satisfies all of the following constraints:
+
+A docker-compose.yml file defines three services: a Selenium Hub, a Chrome browser node, and a Python test-runner container built from a Dockerfile you write.
+The test-runner image installs all Python dependencies from a requirements.txt at build time and contains no pre-written test logic â you write all test code from scratch.
+The pytest suite must contain at least four test functions spread across at least two test classes; each test must navigate to a real public URL, interact with at least one page element, and make at least one assertion about the page state.
+All tests execute against the Selenium Hub over the Docker Compose internal network (not localhost); the Hub URL must be read from an environment variable so it can be overridden without rebuilding the image.
+Running docker compose up --build --abort-on-container-exit must start the grid, execute all tests, and exit cleanly.
+Acceptance Criteria
+
+docker compose up --build --abort-on-container-exit completes with exit code 0, all four test functions are reported as PASSED in the terminal output, and an HTML report file is written to a host-mounted reports/ directory.
+Running docker compose up --build --abort-on-container-exit a second time without any code changes produces identical pass/fail results, confirming the environment is fully reproducible and stateless between runs.
+Task 3: Integrate the Test Pipeline into Jenkins CI
+Problem Statement
+Design and implement a Jenkins CI pipeline that satisfies all of the following constraints:
+
+Jenkins runs as a Docker container on the same EC2 instance; its container must have access to the host Docker socket so it can start and stop the Selenium Compose stack as part of the pipeline.
+A Jenkinsfile in the project root defines a declarative pipeline with at minimum four named stages: Checkout, Start Grid, Run Tests, and Teardown.
+The Run Tests stage must invoke the Compose stack, wait for the Selenium Hub to report "ready": true before launching tests (do not use a fixed sleep), and capture the pytest exit code to mark the build as FAILED if any test fails.
+The pipeline must archive the HTML report and the JUnit XML results file as build artifacts so they are accessible from the Jenkins build page.
+A SCM poll trigger must be configured so Jenkins checks for changes every five minutes; you must demonstrate this by pushing a deliberate test failure, observing the build turn red, fixing it, and observing the build turn green â all without manually clicking "Build Now".
+Acceptance Criteria
+
+The Jenkins build page for a passing run shows all four stages green, lists the HTML report as a downloadable artifact, and the JUnit trend graph shows at least two consecutive passing builds.
+Introducing a failing assertion into one test function, committing, and waiting no more than ten minutes causes Jenkins to automatically trigger a new build that reports the correct number of failures in the JUnit results, then a subsequent fix commit causes the build to return to green automatically.
+Expected Outcomes
+A fully containerised Selenium Grid and Python test suite that any team member can reproduce by running a single docker compose command on a clean Ubuntu machine.
+A Jenkins pipeline that provides continuous, automatic feedback on test health after every code change without any manual intervention.
+Conclusion
+This lab demonstrates that containerised browser testing eliminates "works on my machine" failures by making the browser, the WebDriver server, and the test runner all version-pinned and reproducible. Integrating that container stack into Jenkins closes the feedback loop so regressions are caught within minutes of a commit rather than at release time. The patterns you have built here â a Compose-defined grid, a parameterised Hub URL, and a pipeline that waits for readiness rather than sleeping â are directly transferable to production CI environments at any scale.
