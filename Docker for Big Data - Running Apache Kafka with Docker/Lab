@@ -1,0 +1,106 @@
+Containerized Apache Kafka Streaming Platform on Docker
+Objectives
+Deploy a multi-service Apache Kafka cluster using Docker and Docker Compose, including Zookeeper coordination and a web-based management UI
+Build and containerize Python producer, consumer, and stream-processing applications that communicate exclusively over a Docker bridge network
+Validate end-to-end message flow and real-time stream processing using command-line Kafka tooling from within running containers
+Prerequisites
+Comfort navigating and editing files on a Linux/Ubuntu command line, including writing shell scripts and using a terminal text editor
+Conceptual understanding of message brokers: what a topic, partition, producer, consumer, and consumer group are, and why offset tracking matters
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Container Runtime and Toolchain
+Step 1.1 â Install Docker Engine and Docker Compose Plugin
+Design and execute an installation sequence that results in a working Docker Engine (version 24 or later) and the Docker Compose plugin available as docker compose (with a space, not a hyphen) on your Ubuntu instance. Your sequence must add Docker's official APT repository, install the engine and compose plugin from that repository, configure the current user to run Docker without sudo, and confirm the daemon is active.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official installation guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+You may see "E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list" if the heredoc wrote extra whitespace or a literal backslash.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete the file with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo apt-get install -y python3 python3-pip
+pip3 install kafka-python
+Confirmation: Running docker version must print both Client and Server version numbers without error. Running docker compose version must print a version string beginning with "Docker Compose version v2". Running python3 -c "import kafka; print(kafka.__version__)" must print a version string without error.
+
+Step 1.2 â Install kcat and Verify Kafka Tooling Access
+Design and execute an installation of kcat (the Kafka command-line producer/consumer tool, formerly called kafkacat) from the Ubuntu package repository. After installation, confirm the binary is reachable and can display its help output.
+
+sudo apt-get install -y kcat
+kcat -V
+Confirmation: kcat -V must print a version line such as "kcat 1.7.x" and list supported features including "librdkafka" without returning a non-zero exit code.
+
+Task 2: Deploy a Multi-Service Kafka Cluster and Validate Message Flow
+Step 2.1 â Design and Launch the Kafka Cluster with Docker Compose
+Design and implement a system that runs the following five services as Docker containers on a shared user-defined bridge network named kafka-net, all defined in a single docker-compose.yml file:
+
+Zookeeper (Confluent Platform 7.4.0): the distributed coordination service Kafka uses to track broker metadata and leader elections; must expose port 2181 on the host
+Kafka broker (Confluent Platform 7.4.0): the message broker itself; must expose port 9092 on the host for external clients and communicate with Zookeeper over the internal network
+Kafka UI (provectuslabs/kafka-ui, latest): a web dashboard for inspecting topics, consumer groups, and messages; must expose port 8080 on the host and connect to the broker over the internal network
+Python producer container: built from a Dockerfile you write; must send JSON-encoded IoT sensor readings (sensor ID, temperature, humidity, location, timestamp) to a topic named sensor-data at a rate of at least one message per second, indefinitely, using the kafka-python library
+Python consumer container: built from a Dockerfile you write; must consume from sensor-data as part of a consumer group named sensor-group, log each message to stdout, and log a distinct warning line for any reading where temperature exceeds 30 degrees Celsius
+All persistent broker and Zookeeper data must be stored in named Docker volumes so that data survives a container restart. The producer and consumer containers must not start until the broker container is healthy. You must not hard-code the host machine's IP address anywhere; all inter-container communication must use Docker service hostnames.
+
+Acceptance Criteria:
+
+Running docker compose ps after docker compose up -d --build must show all five services with status "running" (or "Up"), and docker compose logs consumer must display at least ten consumed messages and at least one warning line containing the word "WARNING" within two minutes of startup.
+Navigating to http://<your-ec2-public-ip>:8080 in a browser must display the Kafka UI dashboard showing the cluster name you configured, the sensor-data topic with at least one partition, and a non-zero message count that increases on page refresh.
+Step 2.2 â Validate and Stress-Test Message Flow Using kcat
+Design and execute a validation sequence using kcat on the EC2 host (not inside a container) that proves the broker is reachable on port 9092, that you can produce messages independently of the Python producer, and that you can consume and inspect messages from the beginning of a topic.
+
+Your sequence must accomplish all four of the following without modifying the running Docker Compose stack:
+
+Use kcat in metadata-listing mode (-L) to print the broker address, the list of topics, and the partition leader for sensor-data
+Use kcat in producer mode to publish at least five JSON messages to a new topic named ops-events with a key per message, where each message represents a simulated operational event with fields for event type, service name, and timestamp
+Use kcat in consumer mode to read all messages from ops-events from the beginning of the topic and print each message's key, partition number, and offset alongside its value
+Use kcat in consumer mode with a named consumer group (kcat-validation-group) to consume from sensor-data and confirm that offset commits are tracked by running the Kafka consumer-groups CLI tool inside the broker container and showing that kcat-validation-group appears with a non-zero committed offset
+Acceptance Criteria:
+
+The output of the kcat -L command must list at least three topics (including sensor-data and ops-events) and identify a partition leader for each; the output of the consumer-groups CLI command inside the broker container must show kcat-validation-group with a LOG-END-OFFSET value greater than zero and a LAG value of zero or a small positive integer.
+All five ops-events messages must be printed to the terminal by kcat in consumer mode with correct key, partition, and offset fields visible, and the sensor-data consumer output must show JSON objects containing the fields sensor_id, temperature, humidity, location, and timestamp.
+Task 3: Build and Integrate a Real-Time Stream Processing Service
+Step 3.1 â Design and Deploy a Stateful Stream Processor
+Design and implement a system that adds a sixth container to your Docker Compose stack â a stream processor â that performs the following operations continuously:
+
+Consumes every message from sensor-data as part of a consumer group named processor-group
+Maintains a per-sensor sliding window of the last 10 temperature readings in memory (a sliding window discards the oldest reading each time a new one arrives, keeping the count fixed at 10)
+Computes the rolling average temperature for each sensor across its current window
+Publishes a new enriched JSON record to a topic named processed-data for every input message; the enriched record must include all original fields plus rolling_avg_temp (rounded to two decimal places) and window_size (the number of readings currently in that sensor's window, from 1 to 10)
+Publishes a separate alert record to a topic named temp-alerts whenever a sensor's rolling average temperature exceeds a configurable threshold (default 28 degrees Celsius); the alert record must include sensor_id, rolling_avg_temp, threshold, and alert_timestamp; alerts for the same sensor must not be re-published more than once per 60-second window to avoid flooding
+The processor must be implemented in Python using kafka-python, packaged in its own Dockerfile, and added to docker-compose.yml with a dependency on the broker. The threshold value must be read from a Docker environment variable named TEMP_ALERT_THRESHOLD so it can be changed without rebuilding the image.
+
+Acceptance Criteria:
+
+Running docker compose logs stream-processor after two minutes of operation must show log lines confirming messages are being consumed and enriched records are being produced; running kcat -b localhost:9092 -t processed-data -C -o beginning -e on the host must return at least 20 records, each containing the fields rolling_avg_temp and window_size, with window_size values ranging from 1 to 10 as expected for a sliding window that fills over time.
+Running kcat -b localhost:9092 -t temp-alerts -C -o beginning -e must return at least one alert record containing sensor_id, rolling_avg_temp, threshold, and alert_timestamp; changing TEMP_ALERT_THRESHOLD to 15 in docker-compose.yml, running docker compose up -d to apply the change, and waiting 90 seconds must result in new alert records appearing in temp-alerts at a higher frequency than before, confirming the threshold is read from the environment variable at runtime.
+Step 3.2 â Verify End-to-End Pipeline Integrity with the Consumer Groups CLI
+Design and execute a final verification that proves all three consumer groups (sensor-group, processor-group, and kcat-validation-group) are active, consuming, and keeping up with the producer using only the Kafka CLI tools available inside the broker container.
+
+Your verification must produce a single consolidated report (written to a file named pipeline-report.txt on the EC2 host) that contains: the output of kafka-topics --describe for sensor-data, processed-data, and temp-alerts; the output of kafka-consumer-groups --describe for all three consumer groups; and the total message count for each of the five topics in the cluster (sensor-data, ops-events, processed-data, temp-alerts, and any auto-created internal topics).
+
+Acceptance Criteria:
+
+pipeline-report.txt must exist on the EC2 host, be non-empty, and contain describe output for all three topics and all three consumer groups; the LAG column for sensor-group and processor-group must show a value less than 50 for every partition, confirming consumers are keeping pace with the producer.
+The processed-data topic must have a message count (visible via kafka-run-class kafka.tools.GetOffsetShell inside the broker container) that is within 10 messages of the sensor-data message count, confirming the stream processor is processing every input record without dropping messages.
+Expected Outcomes
+A fully operational six-container Kafka streaming platform running on Docker, with verified producer-to-processor-to-consumer message flow across five topics and three consumer groups, all observable through both the Kafka UI dashboard and CLI tooling.
+A pipeline-report.txt file demonstrating that all consumer groups are active with lag below 50 and that the stream processor is processing input records at near-parity with the producer.
+Conclusion
+This lab required you to design, build, and validate a production-pattern Kafka deployment entirely from scratch â from installing the container runtime through implementing stateful stream processing logic. The skills exercised here â multi-service Docker Compose orchestration, inter-container networking, consumer group offset management, and windowed aggregation â are directly transferable to real-world event-driven data pipeline work. Extend this foundation by replacing the in-memory sliding window with a persistent state store, or by adding a second broker to the Compose stack and experimenting with replication factors greater than one.
