@@ -1,0 +1,92 @@
+Centralized Container Logging with the EFK Stack
+Objectives
+Design and deploy a production-grade EFK (Elasticsearch, Fluentd, Kibana) logging pipeline using Docker Compose
+Configure Fluentd to collect, parse, and route logs from multiple containerized applications into Elasticsearch
+Implement log-based alerting by querying Elasticsearch and triggering threshold-driven notifications
+Prerequisites
+Comfort with Linux command-line operations including file editing, process management, and network inspection
+Familiarity with YAML syntax and basic Docker concepts such as images, containers, and networks
+Understanding of structured logging concepts including log levels, JSON formatting, and index-based storage
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Step 1.1 â Install Docker Engine and Docker Compose
+Install Docker Engine from the official Docker apt repository, then install the Docker Compose plugin.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+If the gpg command fails with "File exists", run: sudo rm /etc/apt/keyrings/docker.gpg and retry. Official guide: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+Troubleshoot this step:
+
+Error seen: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list
+Recovery: Run cat /etc/apt/sources.list.d/docker.list â the file must be one unbroken line with no backslashes; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate using the heredoc above.
+Docs: https://docs.docker.com/engine/install/ubuntu/
+Step 1.2 â Install Supporting CLI Tools and Verify All Components
+Install jq (a command-line JSON processor) and curl, then confirm every tool is operational before proceeding.
+
+sudo apt-get install -y jq curl net-tools
+docker version
+docker compose version
+jq --version
+curl --version
+You should see version output for all four commands with no errors. If docker version returns a permission error, confirm newgrp docker was run in Step 1.1 and retry.
+
+Troubleshoot this step:
+
+Error seen: permission denied while trying to connect to the Docker daemon socket
+Recovery: Run groups to confirm docker appears; if it does not, run sudo usermod -aG docker $USER && newgrp docker and retry.
+Docs: https://docs.docker.com/engine/install/linux-postinstall/
+Task 2: Design and Deploy the EFK Logging Pipeline
+Problem Statement
+Design and implement a multi-container logging system that satisfies all of the following constraints:
+
+An Elasticsearch 7.x single-node cluster stores all ingested log data and is reachable on port 9200 of the host.
+A custom-built Fluentd image (based on fluent/fluentd:v1.16-debian-1) includes the fluent-plugin-elasticsearch gem and is configured to accept logs over the Fluentd forward protocol on port 24224, then write them to Elasticsearch under a daily index named with the prefix docker-logs-.
+A Kibana 7.x instance matching the Elasticsearch version is reachable on port 5601 and connected to Elasticsearch.
+At least two application containers (your choice of image) are configured to use the fluentd Docker logging driver, tagging their output so the source container is identifiable in Elasticsearch.
+A custom Python application container generates a continuous stream of structured JSON log lines at mixed severity levels (INFO, WARNING, ERROR) at a rate of at least one log line every three seconds.
+All services are defined in a single docker-compose.yml and started with one command.
+The Elasticsearch data directory is bind-mounted to a host path so data survives container restarts.
+An Elasticsearch index template is applied (via the REST API) that maps @timestamp as date, container_name as keyword, and log as text for all indices matching docker-logs-*.
+You decide the directory layout, Dockerfile contents, Fluentd configuration structure, index template body, and Python application logic. No starter files are provided.
+
+Acceptance Criteria
+
+Running curl -fsSL http://localhost:9200/docker-logs-*/_count returns a JSON document where the count field is greater than 50, demonstrating that logs from the application containers have been indexed; this must be achievable within five minutes of stack startup.
+Running curl -fsSL "http://localhost:9200/docker-logs-*/_search?size=1&sort=@timestamp:desc" | jq '.hits.hits[0]._source' returns a JSON object that contains both a container_name field and a parseable @timestamp field, confirming that container identity metadata and timestamps are present in every stored document.
+Task 3: Implement Log-Based Alerting
+Problem Statement
+Design and implement a standalone alerting component that satisfies all of the following constraints:
+
+The alerting component is a Python script (or containerized Python service â your choice) that polls Elasticsearch on a configurable interval (default: 60 seconds).
+On each poll, the component executes at least two distinct Elasticsearch queries: one that counts ERROR-level log entries across all docker-logs-* indices in the past five minutes per container, and one that counts total log volume per container in the same window.
+If any container produces more than 10 ERROR-level entries in a five-minute window, the component writes a structured alert record to a local file named alerts.log in JSON format containing at minimum: the container name, the error count, the evaluation timestamp, and the string "severity": "HIGH".
+If any container produces more than 200 total log entries in a five-minute window, the component writes a separate structured alert record to alerts.log with "severity": "VOLUME_SPIKE".
+The alerting component must not crash or exit when Elasticsearch is temporarily unreachable; it must log the connectivity failure to stderr and retry on the next interval.
+To validate the ERROR threshold, you must also create a short-lived container (any image) that emits at least 15 lines containing the word ERROR within a two-minute window and is configured to send its output through Fluentd.
+You decide the query structure, JSON schema for alert records, retry logic, and whether the alerter runs as a host process or a Docker service. No starter code is provided.
+
+Acceptance Criteria
+
+After the short-lived error-generating container runs, the file alerts.log contains at least one JSON object where "severity" is "HIGH" and the container_name field matches the error-generating container's Fluentd tag, verifiable with jq 'select(.severity == "HIGH")' alerts.log.
+When Elasticsearch is stopped with docker compose stop elasticsearch while the alerter is running, the alerter continues running and writes a connectivity-failure message to stderr every poll interval without exiting; when Elasticsearch is restarted with docker compose start elasticsearch, the alerter resumes normal polling and produces correct alert records without requiring a manual restart.
+Expected Outcomes
+A fully operational EFK stack where structured logs from multiple containers are continuously collected, stored with container-identity metadata, and queryable through both the Elasticsearch REST API and the Kibana UI.
+An automated alerting component that detects anomalous error rates and log volume spikes in near-real-time and produces durable, machine-readable alert records without human intervention.
+Conclusion
+This lab required you to integrate three independently complex systems â a distributed search engine, a log router, and a visualization platform â into a single cohesive pipeline entirely from your own design decisions. The alerting component extended that pipeline with operational intelligence, forcing you to reason about failure modes such as backend unavailability and threshold calibration. These are the same architectural concerns present in production observability stacks at scale.
