@@ -1,0 +1,108 @@
+Docker for High-Performance Computing â Containerized MPI Workloads
+Objectives
+Design and deploy a multi-container MPI cluster using Docker and Docker Compose, with SSH-based inter-node communication
+Implement and benchmark a distributed parallel computation that demonstrates measurable speedup across multiple MPI processes
+Build a production-ready, cloud-deployable HPC container image with health checks, resource constraints, and auto-scaling logic
+Prerequisites
+Comfort with Linux command-line operations including file editing, process management, and network diagnostics
+Conceptual understanding of parallel computing: what MPI (Message Passing Interface) is, what ranks and communicators mean, and why distributed workloads require inter-process communication
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the HPC Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, and MPI development libraries
+Install Docker Engine from the official Docker apt repository, then install OpenMPI and its development headers, Python 3 with pip, and the mpi4py and numpy Python packages. After installation, add your current user to the docker group so subsequent commands do not require sudo, then apply the group change to your current shell session.
+
+Official Docker installation guide (use this if any URL below has changed): https://docs.docker.com/engine/install/ubuntu/
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' \
+  "$(dpkg --print-architecture)" \
+  "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+You may see E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list if the printf command wrote a literal backslash into the file instead of a newline.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the printf block.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+sudo apt-get install -y \
+  openmpi-bin \
+  openmpi-common \
+  libopenmpi-dev \
+  python3 \
+  python3-pip
+
+pip3 install --user mpi4py numpy
+Troubleshoot this step:
+
+You may see mpi4py fail to build with error: command 'mpicc' failed if libopenmpi-dev was not installed or mpicc is not on PATH.
+Confirm the compiler wrapper is present with which mpicc; if missing, re-run sudo apt-get install -y libopenmpi-dev and retry pip3 install --user mpi4py.
+Official reference: https://mpi4py.readthedocs.io/en/stable/install.html
+Step 1.2 â Verify every installed component
+Run the following verification block. Every command must exit without error and produce the output described in the inline comments.
+
+docker version                          # must print Client and Server sections
+docker compose version                  # must print Docker Compose version 2.x or later
+mpicc --version                         # must print GCC version used by the MPI compiler wrapper
+mpirun --version                        # must print Open MPI version
+python3 -c "from mpi4py import MPI; print('mpi4py OK')"   # must print: mpi4py OK
+python3 -c "import numpy; print('numpy', numpy.__version__)"  # must print numpy version
+You should observe six lines of successful output with no error messages. If any command fails, resolve it before proceeding â later tasks depend on every tool being functional.
+
+Task 2: Design and Deploy a Distributed MPI Cluster
+Problem Statement
+Design and implement a system that launches a three-node MPI cluster (one master, two workers) as Docker containers sharing a custom bridge network, where the master node can execute an MPI job that distributes work across all three containers using SSH-based process spawning. You must author all Dockerfiles, Compose definitions, SSH configuration, MPI hostfiles, and application code yourself â no templates are provided.
+
+Your cluster must run a parallel numerical integration benchmark (computing pi using the midpoint-rectangle method across 1,000,000,000 intervals) and a distributed matrix multiplication benchmark (500x500 matrices) as separate MPI programs, both written from scratch in either C (compiled with mpicc) or Python (using mpi4py).
+
+Constraints:
+
+Each container image must set OMPI_ALLOW_RUN_AS_ROOT=1 and OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 as environment variables so MPI does not refuse to run as root inside the container.
+SSH must be configured for passwordless login between all three containers using RSA key pairs baked into the image; StrictHostKeyChecking must be disabled for the 172.0.0.0/8 subnet (the Docker bridge range) so MPI can connect without interactive prompts.
+The MPI hostfile must assign exactly 2 slots per node (6 total slots across the cluster).
+All application source files and compiled binaries must live in a bind-mounted host directory so they persist after containers are stopped.
+Acceptance Criteria:
+
+Running mpirun -np 6 --hostfile /hpc/hostfile --allow-run-as-root ./pi_benchmark from inside the master container must complete without error, print the computed value of pi accurate to at least 10 decimal places, and print a wall-clock time showing that the 6-process run is faster than a 1-process run of the same program on the same container â demonstrating measurable parallel speedup.
+
+Running mpirun -np 6 --hostfile /hpc/hostfile --allow-run-as-root python3 matrix_multiply.py from inside the master container must print one status line per rank (6 lines total) each identifying its rank number and the hostname of the container it ran on â confirming that processes executed on all three distinct container hostnames, not only on the master.
+
+Task 3: Benchmark, Scale, and Harden the HPC Stack
+Problem Statement
+Design and implement a system that extends your Task 2 cluster in three directions simultaneously:
+
+Direction 1 â Performance analysis. Write a shell script that runs your pi benchmark with 1, 2, 4, and 6 MPI processes in sequence, captures the wall-clock time reported by each run, and prints a formatted speedup table showing: number of processes, elapsed time in seconds, and speedup ratio relative to the 1-process baseline. The script must write this table to a file named speedup_report.txt in the bind-mounted host directory.
+
+Direction 2 â Docker Swarm scaling. Initialize Docker Swarm on your EC2 instance, deploy your MPI image as a named Swarm service with an initial replica count of 2, then scale it to 5 replicas using a single docker service scale command. The service must declare CPU and memory resource limits (no more than 1 CPU and 1 GB RAM per replica) in its Compose definition.
+
+Direction 3 â Production image hardening. Build a separate production Dockerfile that adds the following to your cluster image: a HEALTHCHECK instruction that verifies the SSH daemon is running every 30 seconds with a 10-second timeout, LABEL metadata fields for maintainer, version, and description, and a non-root user named hpcuser with UID 1001 who owns /opt/hpc â while still allowing MPI to run by setting the OpenMPI root-permission environment variables at the image level. Build this image and confirm the health check status appears as healthy within 90 seconds of container start.
+
+Constraints:
+
+The speedup script must use only tools available in the base Ubuntu image plus your installed packages â no additional installs permitted for this script.
+The Swarm service definition must use an overlay network (MPI over overlay is not required to function in single-node Swarm; the network type requirement is about demonstrating correct Swarm configuration).
+The production image must pass docker inspect --format '{{.State.Health.Status}}' <container_id> returning the string healthy â not starting or none.
+Acceptance Criteria:
+
+The file speedup_report.txt must exist in the bind-mounted host directory after the benchmarking script completes, must contain exactly four data rows (one per process count), and the speedup value in the 6-process row must be greater than 2.0 relative to the 1-process baseline â confirming that the containerized MPI stack achieves super-linear or near-linear scaling on the available CPU cores.
+
+Running docker service ps hpc-stack_hpc-service after the scale command must show exactly 5 replicas all in Running state, and docker inspect --format '{{.State.Health.Status}}' on a running container built from the production Dockerfile must return healthy â confirming both elastic scaling and image-level operational readiness.
+
+Expected Outcomes
+A fully functional three-node containerized MPI cluster that executes distributed parallel workloads across multiple Docker containers with verified inter-container SSH communication and measurable parallel speedup.
+A production-hardened HPC container image with health monitoring, resource constraints, and Swarm-based horizontal scaling, demonstrating a complete path from development cluster to cloud-deployable HPC infrastructure.
+Conclusion
+This lab required you to design every layer of a containerized HPC stack from scratch: the base image, SSH trust configuration, MPI process topology, benchmarking instrumentation, and production hardening. The core challenge was reconciling MPI's assumption of a shared-memory or low-latency fabric with Docker's network isolation model, which you solved through explicit hostfile configuration and SSH tunneling. The speedup measurements and Swarm scaling exercise together demonstrate that containerized HPC is viable for elastic cloud workloads, provided network overhead and resource limits are accounted for in the job design.
