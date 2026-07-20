@@ -37,3 +37,7 @@ app.listen(port, () => {
 });
 
 module.exports = app;
+
+// Change version from '1.0.0' to '1.0.1'
+version: '1.0.1'
+
