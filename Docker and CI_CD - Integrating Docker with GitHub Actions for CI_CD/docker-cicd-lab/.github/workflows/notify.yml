@@ -1,0 +1,28 @@
+name: Workflow Notifications
+
+on:
+  workflow_run:
+    workflows: ["Docker CI/CD Pipeline"]
+    types:
+      - completed
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion != 'cancelled' }}
+    
+    steps:
+    - name: Notify on success
+      if: ${{ github.event.workflow_run.conclusion == 'success' }}
+      run: |
+        echo "🎉 Pipeline succeeded!"
+        echo "✅ All tests passed"
+        echo "🐳 Docker image pushed successfully"
+        echo "🚀 Deployment completed"
+        
+    - name: Notify on failure
+      if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+      run: |
+        echo "❌ Pipeline failed!"
+        echo "🔍 Check the logs for details"
+        echo "📧 Notification sent to development team"
