@@ -198,3 +198,149 @@ pipeline {
     }
 }
 
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_HUB_CREDENTIALS = credentials('docker-hub-credentials')
+        SONAR_TOKEN = credentials('sonarqube-token')
+        IMAGE_NAME = 'your-dockerhub-username/docker-jenkins-demo'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build Application') {
+            steps {
+                script {
+                    echo 'Building Node.js application...'
+                    sh 'npm install'
+                }
+            }
+        }
+        
+        stage('Static Code Analysis') {
+            steps {
+                script {
+                    echo 'Running SonarQube analysis...'
+                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                            sonar-scanner \
+                            -Dsonar.projectKey=docker-jenkins-demo \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=http://localhost:9000 \
+                            -Dsonar.login=${SONAR_TOKEN}
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    echo 'Waiting for Quality Gate...'
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                script {
+                    echo 'Running application tests...'
+                    sh 'npm test'
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo 'Building Docker image...'
+                    def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                    docker.build("${IMAGE_NAME}:latest")
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo 'Scanning Docker image for vulnerabilities...'
+                    sh "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('Push to Docker Hub') {
+            steps {
+                script {
+                    echo 'Pushing image to Docker Hub...'
+                    docker.withRegistry('https://registry.hub.docker.com', 'docker-hub-credentials') {
+                        def image = docker.image("${IMAGE_NAME}:${IMAGE_TAG}")
+                        image.push()
+                        image.push('latest')
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            steps {
+                script {
+                    echo 'Deploying to staging environment...'
+                    sh './deploy.sh'
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            steps {
+                script {
+                    echo 'Running integration tests...'
+                    sh '''
+                        # Wait for application to be ready
+                        sleep 10
+                        
+                        # Test application endpoints
+                        curl -f http://localhost/health
+                        curl -f http://localhost/ | grep "Hello from Docker"
+                        
+                        echo "Integration tests passed!"
+                    '''
+                }
+            }
+        }
+        
+        stage('Clean Up') {
+            steps {
+                script {
+                    echo 'Cleaning up local images...'
+                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline completed!'
+        }
+        success {
+            echo 'Pipeline succeeded!'
+            echo 'Application deployed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+            sh 'docker-compose logs || true'
+        }
+    }
+}
