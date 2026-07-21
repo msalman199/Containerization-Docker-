@@ -1,0 +1,108 @@
+Docker for Continuous Integration â Running Unit Tests in Containers
+Objectives
+Design and build containerized test environments for polyglot applications from scratch
+Implement a multi-stage CI pipeline that runs tests in isolation and gates deployment on passing results
+Produce structured test reports and coverage artifacts consumable by a CI orchestrator
+Prerequisites
+Comfort navigating and editing files on an Ubuntu command line
+Basic understanding of what unit tests are and why they run in isolation from production code
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the CI Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, Python 3, Node.js 18, and Git
+Install Docker Engine from the official Docker apt repository.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+You may see "E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list" if the heredoc wrote a backslash or blank line into the file.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be one unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it.
+https://docs.docker.com/engine/install/ubuntu/
+Install Node.js 18 via the NodeSource setup script.
+
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+Official guide if the URL above changes: https://github.com/nodesource/distributions
+
+Troubleshoot this step:
+
+You may see "E: Unable to locate package nodejs" if the NodeSource repository was not added correctly.
+Re-run the curl command and confirm it exits with code 0 by appending ; echo "exit: $?" â if it prints an HTML error page, your instance may lack outbound internet access on port 443.
+https://github.com/nodesource/distributions#installation-instructions
+Install Python 3, pip, and Git.
+
+sudo apt-get install -y python3 python3-pip python3-venv git
+Step 1.2 â Verify every tool is operational before proceeding
+Run all verification commands in one block; every line must exit without error.
+
+docker run --rm hello-world
+docker compose version
+python3 --version
+node --version
+npm --version
+git --version
+Confirmation: docker run --rm hello-world prints "Hello from Docker!" and exits 0. All version strings print without "command not found".
+
+Troubleshoot this step:
+
+You may see "permission denied while trying to connect to the Docker daemon socket" if the group membership change has not taken effect.
+Run groups and confirm docker appears; if it does not, log out and back in, or run newgrp docker again.
+https://docs.docker.com/engine/install/linux-postinstall/
+Task 2: Build Containerized Test Environments for Two Applications
+Problem Statement
+Design and implement two independent, containerized test environments â one for a Python web application and one for a Node.js web application â such that running a single docker build followed by docker run --rm for each image executes all unit tests and exits with code 0 on success or non-zero on any test failure.
+
+You decide the application logic, test cases, Dockerfile strategy, dependency management, and directory layout. The only constraints are listed in the acceptance criteria below.
+
+Constraints:
+
+Each application must expose at least three HTTP routes, one of which performs a calculation with URL parameters.
+Each test suite must contain at least five distinct test cases covering normal inputs, edge cases, and an invalid-route check.
+No test may depend on a running container or external network call; all tests must run entirely inside the image at build-run time.
+Images must be built from official base images pulled from Docker Hub (python:3.9-slim and node:18-alpine are recommended starting points, but you may choose equivalents).
+Acceptance Criteria:
+
+docker run --rm <your-python-image> and docker run --rm <your-nodejs-image> each complete with exit code 0, and the terminal output shows a per-test pass/fail summary with a total count of at least five tests passing for each image.
+
+Introducing a deliberate bug into one application route (for example, returning the wrong HTTP status code) causes the corresponding docker run --rm command to exit with a non-zero code and print which test failed, without affecting the other image.
+
+Task 3: Implement a Multi-Service CI Pipeline That Gates Deployment
+Problem Statement
+Design and implement a CI pipeline â using Docker Compose as the orchestration layer and a shell script as the pipeline runner â that builds both images, runs both test suites in parallel, and only starts the application services if all tests pass. The pipeline must produce a structured exit code (0 for full success, non-zero for any failure) and write a plain-text summary report to a file on the host.
+
+You decide the Compose service topology, the pipeline script logic, the health-check strategy, and the report format. The constraints and acceptance criteria below define what the finished system must demonstrate.
+
+Constraints:
+
+The pipeline script must not hard-code image names or service names; it must read them from environment variables or a configuration file that you define.
+Application services must not start if either test service exits non-zero; enforce this in the pipeline script, not solely through Compose depends_on.
+The summary report file must record: timestamp, pass/fail status for each test service, and the HTTP health-check result for each application service.
+The pipeline must clean up all containers and anonymous volumes after it finishes, whether it succeeded or failed (use a trap or equivalent).
+Acceptance Criteria:
+
+Running the pipeline script from a clean state (no pre-built images, no running containers) completes end-to-end: both images build, both test suites pass, both application services start, both /health endpoints return HTTP 200 verified by curl --fail, and the summary report file exists on the host with all four required fields populated.
+
+When one test suite is made to fail (by injecting a bug as in Task 2), the pipeline script exits non-zero, the application services are never started (confirmed by docker ps showing no running containers for those services), and the summary report records the failure â all without manual intervention after the initial script invocation.
+
+Expected Outcomes
+Two Docker images that encapsulate complete, self-contained test environments and enforce a pass/fail exit code boundary usable by any CI system.
+A single pipeline script that a CI orchestrator (Jenkins, GitLab CI, or GitHub Actions) could invoke as a build step with no modification other than setting the environment variables you defined.
+Conclusion
+This lab demonstrates that containerized test environments eliminate "works on my machine" failures by making the runtime fully reproducible from a Dockerfile. Gating deployment on a structured exit code â rather than on a human reading terminal output â is the foundational pattern that makes CI pipelines reliable at scale. The same Docker Compose and shell-script approach you built here maps directly onto the agent-based job model used by Jenkins, GitLab CI, and GitHub Actions.
