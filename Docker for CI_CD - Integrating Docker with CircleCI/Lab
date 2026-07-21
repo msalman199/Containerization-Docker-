@@ -1,0 +1,142 @@
+Docker CI/CD Pipeline with CircleCI
+Objectives
+Design and implement a fully automated Docker image build, test, and push pipeline using CircleCI
+Integrate container security scanning and multi-stage Docker builds into a CI/CD workflow
+Configure environment-aware image tagging and conditional deployment logic in CircleCI
+Prerequisites
+Familiarity with Linux command-line operations on Ubuntu, including file editing and process management
+Understanding of Git branching, commits, and remote repository operations
+Conceptual knowledge of CI/CD pipelines, Docker image layering, and container lifecycle
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Requirement 1
+Install Docker Engine, Git, Node.js 18, and the CircleCI CLI on the Ubuntu instance, then verify each tool responds correctly to a version query.
+
+# Update package index
+sudo apt-get update -y
+
+# Install prerequisites for adding external repositories
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repository (single unbroken line written via printf)
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' \
+  "$(dpkg --print-architecture)" \
+  "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+# Official Docker install guide if the above URL changes:
+# https://docs.docker.com/engine/install/ubuntu/
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+# Allow current user to run Docker without sudo
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+Error seen: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list
+Recovery: Run cat /etc/apt/sources.list.d/docker.list â the file must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the printf command above.
+Official docs: https://docs.docker.com/engine/install/ubuntu/
+# Install Node.js 18 via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+
+# Official NodeSource install guide if the above URL changes:
+# https://github.com/nodesource/distributions
+
+sudo apt-get install -y nodejs
+
+# Install Git
+sudo apt-get install -y git
+
+# Install CircleCI CLI
+curl -fsSL https://raw.githubusercontent.com/CircleCI-Public/circleci-cli/main/install.sh \
+  | sudo bash
+
+# Official CircleCI CLI install guide if the above URL changes:
+# https://circleci.com/docs/local-cli/
+Troubleshoot this step:
+
+Error seen: curl: (22) The requested URL returned error: 404 when fetching the CircleCI install script.
+Recovery: Visit https://circleci.com/docs/local-cli/ and follow the manual binary download instructions for Linux.
+Official docs: https://circleci.com/docs/local-cli/
+# Verify all tools
+docker --version
+git --version
+node --version
+npm --version
+circleci version
+Acceptance Criteria
+docker --version prints a version string beginning with Docker version 24 or later, and docker run hello-world exits with code 0 without using sudo.
+node --version prints v18.x.x, circleci version prints a semantic version string, and git --version prints a version string â all without errors.
+Requirement 2
+Create a GitHub repository named circleci-docker-pipeline, connect it to a CircleCI project, and store DOCKER_USERNAME and DOCKER_PASSWORD (a Docker Hub access token, not your account password) as CircleCI environment variables scoped to that project.
+
+To create a Docker Hub access token: log in at https://hub.docker.com, navigate to Account Settings > Security > New Access Token, select Read/Write/Delete permissions, and copy the generated token.
+
+To add environment variables in CircleCI: open your project in the CircleCI dashboard, go to Project Settings > Environment Variables, and add each variable by name and value.
+
+Acceptance Criteria
+The CircleCI project dashboard shows the circleci-docker-pipeline repository as an active project with at least one pipeline trigger visible.
+Running circleci env list --project-slug gh/<YOUR_GITHUB_USERNAME>/circleci-docker-pipeline from the instance returns both DOCKER_USERNAME and DOCKER_PASSWORD as masked variable names (values are hidden; names must appear).
+Task 2: Design and Implement the Application, Dockerfile, and CI Test Pipeline
+Requirement 1
+Design a minimal HTTP service in any language or runtime of your choice that exposes at least two routes: one root route returning a JSON payload that includes a version field, and one /health route returning {"status":"healthy"} with HTTP 200. Write a unit test suite that asserts both routes return the correct status codes and JSON fields. Package the service using a multi-stage Dockerfile: the first stage installs all dependencies and runs the unit tests; the second stage produces a minimal production image that runs as a non-root user and includes a HEALTHCHECK instruction targeting /health.
+
+Constraints:
+
+The production image must not contain test dependencies or source files beyond what is needed to run the service.
+The non-root user must be created inside the Dockerfile itself â do not rely on a base image that already provides one.
+The HEALTHCHECK interval must be 30 seconds or less.
+Acceptance Criteria
+Running docker build -t pipeline-app:local . completes with exit code 0, and the build log shows the unit test stage executing and passing before the production stage begins.
+Running docker run -d --name verify-app -p 3000:3000 pipeline-app:local followed by curl -sf http://localhost:3000/health returns {"status":"healthy"} and curl -sf http://localhost:3000/ returns a JSON object containing a version key â both within 30 seconds of container start.
+Requirement 2
+Write a .circleci/config.yml that defines two sequential jobs connected in a single workflow. The first job (test) must install dependencies and run the unit test suite inside a CI executor without Docker-in-Docker. The second job (build-and-push) must depend on test, build the multi-stage Docker image, run a live container smoke test against the built image (verifying /health returns HTTP 200), log in to Docker Hub using the stored environment variables, and push two tags: one using the CircleCI commit SHA ($CIRCLE_SHA1) and one using the branch name ($CIRCLE_BRANCH). The build-and-push job must only execute when the triggering branch is main.
+
+Constraints:
+
+Use setup_remote_docker for all Docker operations in CircleCI â do not install Docker manually inside a job.
+Dependency caching must be implemented for the package manager used in the test job, keyed on the lockfile checksum.
+No plaintext credentials may appear anywhere in config.yml; all secrets must reference environment variables.
+Acceptance Criteria
+Pushing a commit to the main branch triggers a CircleCI pipeline in which both test and build-and-push show green (passed) status, and the CircleCI UI shows the build-and-push job listed as depending on test.
+Docker Hub shows two new tags for the repository â one matching the full 40-character commit SHA of the pushed commit and one matching main â both pushed within the same pipeline run.
+Task 3: Extend the Pipeline with Security Scanning and Conditional Deployment
+Requirement 1
+Extend the build-and-push job to include a Trivy (https://github.com/aquasecurity/trivy) vulnerability scan of the built image before the push step. The scan must target HIGH and CRITICAL severity CVEs. Configure the scan so that the presence of CRITICAL vulnerabilities causes the job to fail (non-zero exit), while HIGH-only findings produce a warning in the log but do not block the push. Store the full Trivy JSON report as a CircleCI artifact named trivy-report.json.
+
+Trivy installation reference: https://aquasecurity.github.io/trivy/latest/getting-started/installation/
+
+Constraints:
+
+Trivy must be installed inside the job at runtime â do not use a Trivy-specific CircleCI orb.
+The artifact must be stored using the store_artifacts step, not uploaded manually.
+The exit-code logic distinguishing CRITICAL from HIGH must be implemented in shell within the job step, not by running Trivy twice with different flags.
+Acceptance Criteria
+The CircleCI pipeline artifacts panel for a completed build-and-push job contains a downloadable file named trivy-report.json whose contents are valid JSON with a top-level Results array.
+Temporarily introducing a FROM base image known to carry a CRITICAL CVE (such as node:14 as of 2024) causes the build-and-push job to fail at the scan step with a non-zero exit code and a log line containing the word CRITICAL, while reverting to a current Alpine-based image allows the job to pass.
+Requirement 2
+Add a third job (deploy-staging) to the workflow that runs only on the main branch after build-and-push succeeds. This job must pull the image tagged with $CIRCLE_SHA1 from Docker Hub, run it as a detached container on the CircleCI remote Docker host, execute a functional smoke test that sends an HTTP GET to /health and asserts the response body equals {"status":"healthy"}, and then write a deployment manifest file â a plain JSON file containing the image name with SHA tag, the pipeline number ($CIRCLE_PIPELINE_NUM), the timestamp, and the result (passed or failed) â and store it as a CircleCI artifact named deploy-manifest.json.
+
+Constraints:
+
+The smoke test must use only tools available in the executor base image or installable via the package manager â no external testing frameworks.
+The deployment manifest must be generated by the job itself using shell commands, not committed to the repository.
+If the smoke test fails, the manifest must still be written with "result": "failed" before the job exits non-zero.
+Acceptance Criteria
+A completed deploy-staging job in the CircleCI UI shows all steps green, and the artifacts panel contains deploy-manifest.json with a result field equal to "passed" and an image field containing the full DOCKER_USERNAME/circleci-docker-pipeline:<SHA> string matching the triggering commit.
+Deliberately breaking the /health route (for example, returning HTTP 500) and pushing to main causes deploy-staging to fail, and the stored deploy-manifest.json artifact contains "result": "failed" â confirming the manifest is written even on failure.
+Expected Outcomes
+A fully automated three-job CircleCI pipeline that builds, scans, tests, and conditionally deploys a Dockerized application from a single git push to main with no manual intervention.
+Docker Hub contains versioned image tags tied to commit SHAs, providing a complete and auditable image history for every successful pipeline run.
+Conclusion
+You have designed and implemented a production-pattern CI/CD pipeline that enforces quality gates â unit tests, container smoke tests, and vulnerability scanning â before any image reaches a registry or deployment target. The conditional job structure ensures that only code merged to main progresses through the full pipeline, reflecting a standard trunk-based delivery model. Extend this foundation by replacing the simulated deploy-staging job with a real cloud deployment target such as AWS ECS or Google Cloud Run using the same credential injection pattern established here.
