@@ -1,0 +1,382 @@
+ Docker and Data - Managing Persistent Data in Containers
+Lab Objectives
+By the end of this lab, you will be able to:
+
+Understand the concept of persistent data in Docker containers
+Create and manage Docker volumes for data persistence
+Mount volumes to containers and store data effectively
+Ensure data persists across container restarts and removals
+Implement backup and restore strategies for Docker volumes
+Deploy database containers with persistent storage and monitor them in a production-like setup
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Docker concepts (containers, images)
+Familiarity with Linux command line operations
+Knowledge of basic database operations (helpful but not required)
+Understanding of file system concepts
+Technical Requirements:
+
+Docker Engine installed and running
+Sufficient disk space for creating volumes and containers
+Network connectivity for pulling Docker images
+Install Docker Engine if it is not already present (Ubuntu example):
+
+sudo apt-get update
+sudo apt-get install -y docker.io
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+Log out and back in (or run newgrp docker) so your user can run docker without sudo. Al Nafi cloud machines come with Docker pre-installed, so this step can be skipped on that environment.
+
+Ready-to-Use Cloud Machines
+Al Nafi provides pre-configured Linux-based cloud machines with Docker already installed and configured. Simply click Start Lab to access your environment. No need to build your own virtual machine or install Docker manually.
+
+Your lab environment includes:
+
+Ubuntu Linux with Docker Engine
+Pre-pulled common Docker images
+All necessary tools and utilities
+Root access for system-level operations
+Lab Tasks Overview
+This lab is divided into three main tasks, each broken down into manageable subtasks:
+
+Create and Mount Docker Volumes - Volume creation, inspection, mounting, and persistence testing
+Backup and Restore Operations - Implement data protection strategies for volumes
+Production Database Deployment with Monitoring - Deploy MySQL and PostgreSQL with persistent storage and verify/monitor persistence
+Task 1: Create Docker Volumes and Verify Persistence
+Understanding Docker Volumes
+Docker volumes are the preferred mechanism for persisting data generated and used by Docker containers. Unlike bind mounts, volumes are completely managed by Docker and offer several advantages:
+
+Isolation: Volumes are stored in a part of the host filesystem managed by Docker
+Portability: Easier to back up or migrate than bind mounts
+Performance: Better performance for I/O heavy workloads
+Security: Can be managed using Docker CLI commands without exposing host paths
+Step 1.1: Create and Inspect Volumes
+# Create a new Docker volume named 'mydata'
+docker volume create mydata
+
+# List all Docker volumes
+docker volume ls
+
+# Get detailed information about the volume
+docker volume inspect mydata
+
+# Create additional purpose-specific volumes
+docker volume create db_data
+docker volume create app_logs
+docker volume create app_config
+
+docker volume ls
+Explore where Docker stores volume data on the host:
+
+docker info | grep "Docker Root Dir"
+sudo ls -la /var/lib/docker/volumes/
+Deliverable: Output of docker volume ls showing at least four volumes (mydata, db_data, app_logs, app_config), and the docker volume inspect mydata JSON output showing "Mountpoint" under /var/lib/docker/volumes/mydata/_data.
+
+Step 1.2: Mount a Volume, Store Data, and Confirm Persistence
+Run a container with the volume mounted and write data into it:
+
+docker run -it --name data-container \
+  --mount source=mydata,target=/app/data \
+  ubuntu:latest bash -c "
+    mkdir -p /app/data/documents /app/data/images
+    echo 'This is my first persistent file' > /app/data/documents/readme.txt
+    echo '{\"env\": \"test\"}' > /app/data/config.json
+    echo \"Log entry: \$(date)\" > /app/data/app.log
+    dd if=/dev/zero of=/app/data/images/testfile.img bs=1M count=10
+    ls -la /app/data
+    ls -la /app/data/documents
+  "
+Verify the data from the host filesystem directly (Docker manages this path):
+
+sudo ls -la /var/lib/docker/volumes/mydata/_data/
+sudo cat /var/lib/docker/volumes/mydata/_data/documents/readme.txt
+Remove the original container completely, then attach a brand-new container to the same volume using a different mount point to prove the data is independent of any single container:
+
+docker rm -f data-container
+
+docker run --rm -it \
+  --mount source=mydata,target=/data \
+  ubuntu:latest \
+  bash -c "ls -la /data && cat /data/documents/readme.txt"
+Deliverable: Terminal output from the final command showing readme.txt, config.json, app.log, and the images directory listed under /data, and the file content This is my first persistent file printed correctly, even though data-container no longer exists and the new container never mounted /app/data.
+
+Task 2: Back Up and Restore Data from Docker Volumes
+Understanding Volume Backup Strategies
+Backing up Docker volumes is essential for data protection and disaster recovery. A common, portable approach is to run a throwaway container that mounts the volume and a host backup directory, then use tar to archive the volume contents.
+
+Step 2.1: Populate a Volume and Create a Backup
+# Create a volume for backup testing
+docker volume create backup_test
+
+# Populate it with representative test data
+docker run --rm \
+  --mount source=backup_test,target=/data \
+  ubuntu:latest bash -c "
+    mkdir -p /data/documents /data/configs /data/logs
+    echo 'Important document content' > /data/documents/important.txt
+    echo 'Database configuration' > /data/configs/db.conf
+    echo 'Application settings' > /data/configs/app.conf
+    for i in 1 2 3 4 5; do
+      echo \"Log entry \$i: \$(date)\" >> /data/logs/app.log
+    done
+    echo 'Backup test data created successfully'
+    find /data -type f
+  "
+
+# Create a host directory to store backups
+mkdir -p ~/docker-backups
+
+# Archive the volume contents into a timestamped tarball
+docker run --rm \
+  --mount source=backup_test,target=/data \
+  -v ~/docker-backups:/backup \
+  ubuntu:latest \
+  tar czf /backup/backup_test_$(date +%Y%m%d_%H%M%S).tar.gz -C /data .
+
+ls -la ~/docker-backups/
+Deliverable: A .tar.gz file listed under ~/docker-backups/ with a name matching backup_test_<timestamp>.tar.gz and a non-zero size.
+
+Step 2.2: Simulate Data Loss and Restore into a New Volume
+# Remove the original volume to simulate data loss
+docker volume rm backup_test
+docker volume ls | grep backup_test || echo "Volume successfully removed"
+
+# Create a fresh volume for restoration
+docker volume create backup_test_restored
+
+# Restore data from the most recent backup archive
+docker run --rm \
+  --mount source=backup_test_restored,target=/data \
+  -v ~/docker-backups:/backup \
+  ubuntu:latest bash -c "
+    LATEST=\$(ls -t /backup/backup_test_*.tar.gz | head -1)
+    tar xzf \"\$LATEST\" -C /data
+  "
+
+# Verify the restored data
+docker run --rm \
+  --mount source=backup_test_restored,target=/data \
+  ubuntu:latest bash -c "
+    echo '--- Restored file listing ---'
+    find /data -type f
+    echo '--- Document content ---'
+    cat /data/documents/important.txt
+    echo '--- Log line count ---'
+    wc -l /data/logs/app.log
+  "
+Wrap the backup logic into a reusable script:
+
+mkdir -p ~/docker-backups
+cat > ~/docker-backups/backup_volume.sh << 'EOF'
+#!/bin/bash
+# Docker Volume Backup Script
+# Usage: ./backup_volume.sh <volume_name> [backup_directory]
+
+VOLUME_NAME=$1
+BACKUP_DIR=${2:-$HOME/docker-backups}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="${BACKUP_DIR}/${VOLUME_NAME}_${TIMESTAMP}.tar.gz"
+
+if [ -z "$VOLUME_NAME" ]; then
+    echo "Usage: $0 <volume_name> [backup_directory]"
+    exit 1
+fi
+
+if ! docker volume inspect "$VOLUME_NAME" > /dev/null 2>&1; then
+    echo "Error: Volume '$VOLUME_NAME' does not exist"
+    exit 1
+fi
+
+mkdir -p "$BACKUP_DIR"
+
+echo "Creating backup of volume '$VOLUME_NAME'..."
+docker run --rm \
+    --mount source="$VOLUME_NAME",target=/data \
+    -v "$BACKUP_DIR":/backup \
+    ubuntu:latest \
+    tar czf "/backup/$(basename "$BACKUP_FILE")" -C /data .
+
+if [ $? -eq 0 ]; then
+    echo "Backup created successfully: $BACKUP_FILE"
+    echo "Backup size: $(du -h "$BACKUP_FILE" | cut -f1)"
+else
+    echo "Backup failed!"
+    exit 1
+fi
+EOF
+
+chmod +x ~/docker-backups/backup_volume.sh
+~/docker-backups/backup_volume.sh backup_test_restored
+Deliverable: Console output confirming important.txt contains Important document content and app.log reports 5 lines after restore, plus a success message from backup_volume.sh naming a new backup file.
+
+Task 3: Deploy Production Databases with Persistent Storage and Monitoring
+Understanding Production Database Requirements
+Production database deployments require careful attention to data persistence, backup strategy, and ongoing monitoring. This task deploys MySQL and PostgreSQL containers backed by named volumes, verifies persistence across restarts and recreation, and adds a monitoring script.
+
+Step 3.1: Deploy MySQL and PostgreSQL with Persistent Volumes
+# Volumes for MySQL
+docker volume create mysql_data
+docker volume create mysql_logs
+
+# Deploy MySQL
+docker run -d \
+  --name mysql-prod \
+  --restart unless-stopped \
+  -e MYSQL_ROOT_PASSWORD=SecureRootPass123! \
+  -e MYSQL_DATABASE=production_db \
+  -e MYSQL_USER=app_user \
+  -e MYSQL_PASSWORD=AppUserPass123! \
+  -p 3306:3306 \
+  --mount source=mysql_data,target=/var/lib/mysql \
+  --mount source=mysql_logs,target=/var/log/mysql \
+  mysql:8.0
+
+# Volumes for PostgreSQL
+docker volume create postgres_data
+
+# Deploy PostgreSQL
+docker run -d \
+  --name postgres-prod \
+  --restart unless-stopped \
+  -e POSTGRES_DB=app_production \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=PostgresRootPass123! \
+  -p 5432:5432 \
+  --mount source=postgres_data,target=/var/lib/postgresql/data \
+  postgres:15
+
+echo "Waiting for databases to initialize..."
+sleep 30
+docker ps --filter "name=mysql-prod" --filter "name=postgres-prod" \
+  --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+Create test data in both databases:
+
+docker exec -i mysql-prod mysql -u app_user -pAppUserPass123! production_db << 'EOF'
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(100) NOT NULL
+);
+INSERT INTO users (username, email) VALUES
+('john_doe', 'john@example.com'),
+('jane_smith', 'jane@example.com'),
+('bob_wilson', 'bob@example.com');
+SELECT COUNT(*) AS user_count FROM users;
+EOF
+
+export PGPASSWORD='PostgresRootPass123!'
+docker exec -e PGPASSWORD='PostgresRootPass123!' -i postgres-prod psql -U postgres -d app_production << 'EOF'
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    price DECIMAL(10,2) NOT NULL
+);
+INSERT INTO products (name, price) VALUES
+('Gaming Laptop', 1299.99),
+('Office Chair', 299.99),
+('Coffee Maker', 89.99);
+SELECT COUNT(*) AS product_count FROM products;
+EOF
+Deliverable: Both SELECT COUNT(*) queries return 3, confirming both databases are populated and reachable.
+
+Step 3.2: Test Persistence and Add Monitoring
+Restart both containers and confirm data survives:
+
+docker restart mysql-prod postgres-prod
+sleep 20
+
+docker exec mysql-prod mysql -u app_user -pAppUserPass123! production_db -e \
+  "SELECT COUNT(*) AS user_count FROM users;"
+
+docker exec -e PGPASSWORD='PostgresRootPass123!' postgres-prod psql -U postgres -d app_production -c \
+  "SELECT COUNT(*) AS product_count FROM products;"
+Now remove and recreate the MySQL container entirely (same volumes, new container instance) to prove the volume, not the container, holds the data:
+
+docker stop mysql-prod
+docker rm mysql-prod
+
+docker run -d \
+  --name mysql-prod \
+  --restart unless-stopped \
+  -e MYSQL_ROOT_PASSWORD=SecureRootPass123! \
+  -e MYSQL_DATABASE=production_db \
+  -e MYSQL_USER=app_user \
+  -e MYSQL_PASSWORD=AppUserPass123! \
+  -p 3306:3306 \
+  --mount source=mysql_data,target=/var/lib/mysql \
+  --mount source=mysql_logs,target=/var/log/mysql \
+  mysql:8.0
+
+sleep 30
+docker exec mysql-prod mysql -u app_user -pAppUserPass123! production_db -e \
+  "SELECT username, email FROM users;"
+Create a monitoring script that checks container status, volume disk usage, and database health. Note the PGPASSWORD export required to avoid an interactive password prompt for psql:
+
+mkdir -p ~/docker-lab/backup-scripts
+cat > ~/docker-lab/backup-scripts/db_monitor.sh << 'EOF'
+#!/bin/bash
+
+export PGPASSWORD='PostgresRootPass123!'
+
+echo "=== Docker Volume and Database Monitoring Report ==="
+echo "Generated: $(date)"
+echo
+
+echo "--- Volume Disk Usage ---"
+docker system df -v | grep -A 20 "Local Volumes"
+
+echo
+echo "--- Container Status ---"
+docker ps --filter "name=mysql-prod" --filter "name=postgres-prod" \
+  --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+echo
+echo "--- MySQL Health Check ---"
+if docker ps --filter "name=mysql-prod" --format "{{.Names}}" | grep -q mysql-prod; then
+    docker exec mysql-prod mysql -u root -pSecureRootPass123! -e \
+      "SHOW STATUS LIKE 'Threads_connected';"
+else
+    echo "mysql-prod is not running"
+fi
+
+echo
+echo "--- PostgreSQL Health Check ---"
+if docker ps --filter "name=postgres-prod" --format "{{.Names}}" | grep -q postgres-prod; then
+    docker exec -e PGPASSWORD="$PGPASSWORD" postgres-prod psql -U postgres -c \
+      "SELECT count(*) AS active_connections FROM pg_stat_activity WHERE state = 'active';"
+else
+    echo "postgres-prod is not running"
+fi
+EOF
+
+chmod +x ~/docker-lab/backup-scripts/db_monitor.sh
+~/docker-lab/backup-scripts/db_monitor.sh
+Deliverable: The SELECT username, email FROM users; output after container recreation still lists all three original users, and db_monitor.sh runs to completion without any interactive password prompt, printing volume usage, container status, and both database health checks.
+
+Troubleshooting Common Issues
+Volume not mounting correctly:
+
+docker volume ls | grep volume_name
+docker volume inspect volume_name
+docker inspect container_name | grep -A 10 "Mounts"
+Permission denied when accessing volume data:
+
+docker exec container_name ls -la /mount/point
+docker exec container_name chown -R user:group /mount/point
+PostgreSQL psql hangs waiting for a password:
+
+# Always export PGPASSWORD or use -e PGPASSWORD='...' on docker exec
+export PGPASSWORD='PostgresRootPass123!'
+docker exec -e PGPASSWORD="$PGPASSWORD" postgres-prod psql -U postgres -c "SELECT 1;"
+Database container won't start:
+
+docker logs mysql-prod
+docker logs postgres-prod
+netstat -tlnp | grep -E ':3306|:5432'
+Expected Outcomes
+Named Docker volumes are created, inspected, mounted, and shown to retain data independently of any single container's lifecycle
+Volume data is backed up to a host directory via tar and successfully restored into a brand-new volume after simulated data loss
+MySQL and PostgreSQL containers run with persistent storage, survive restarts and full container recreation without data loss, and are checked by a non-interactive monitoring script
+Conclusion
+In this lab, you worked hands-on with Docker's persistent storage model, moving from basic volume creation and inspection through to backing up and restoring data, and finally deploying production-style MySQL and PostgreSQL containers on named volumes. You confirmed experimentally that data written to a volume survives container removal, restarts, and full recreation, which is the core guarantee that makes volumes suitable for stateful workloads like databases. You also built reusable backup and monitoring scripts, learning along the way that tools like psql require explicit credential handling, such as exporting PGPASSWORD, to run safely inside non-interactive automation. Overall, you now have practical experience applying Docker volume management, backup and restore workflows, and basic database persistence verification to real deployment scenarios.
