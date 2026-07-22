@@ -1,0 +1,9 @@
+replicaCount: 5
+
+image:
+  tag: "nonexistent-tag"
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
