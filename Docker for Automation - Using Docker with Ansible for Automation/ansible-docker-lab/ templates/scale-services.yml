@@ -1,0 +1,98 @@
+---
+- name: Scale Docker Services Across Multiple Hosts
+  hosts: all
+  become: yes
+  vars:
+    app_replicas: 2
+    
+  tasks:
+    - name: Install Docker on all hosts
+      apt:
+        name: docker.io
+        state: present
+        update_cache: yes
+
+    - name: Start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+- name: Deploy Web Applications
+  hosts: web_servers
+  become: yes
+  tasks:
+    - name: Pull application image
+      docker_image:
+        name: nginx
+        tag: latest
+        source: pull
+
+    - name: Create web content directory
+      file:
+        path: /opt/webapp
+        state: directory
+        mode: '0755'
+
+    - name: Create custom index page
+      copy:
+        content: |
+          <html>
+          <head><title>Scaled Web App</title></head>
+          <body>
+            <h1>Web Server: {{ inventory_hostname }}</h1>
+            <p>This is instance {{ ansible_default_ipv4.address }}</p>
+            <p>Deployed at: {{ ansible_date_time.iso8601 }}</p>
+          </body>
+          </html>
+        dest: /opt/webapp/index.html
+
+    - name: Deploy web application containers
+      docker_container:
+        name: "webapp-{{ item }}"
+        image: nginx:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ 8080 + item }}:80"
+        volumes:
+          - "/opt/webapp:/usr/share/nginx/html:ro"
+        labels:
+          service: "webapp"
+          instance: "{{ item }}"
+          host: "{{ inventory_hostname }}"
+      loop: "{{ range(app_replicas) | list }}"
+
+- name: Deploy Load Balancer
+  hosts: database_servers
+  become: yes
+  tasks:
+    - name: Install HAProxy
+      apt:
+        name: haproxy
+        state: present
+
+    - name: Generate HAProxy configuration
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        backup: yes
+      notify: restart haproxy
+
+    - name: Start HAProxy service
+      systemd:
+        name: haproxy
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart haproxy
+      systemd:
+        name: haproxy
+        state: restarted
