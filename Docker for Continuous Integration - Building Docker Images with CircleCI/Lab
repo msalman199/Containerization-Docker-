@@ -1,0 +1,82 @@
+Docker Continuous Integration with CircleCI
+Objectives
+Configure a CircleCI pipeline that automatically builds, tests, and pushes a Docker image to Docker Hub on every commit to a specified branch
+Implement Docker layer caching and workspace artifact passing between CircleCI jobs to reduce total pipeline execution time
+Design a multi-stage workflow that gates a Docker Hub push behind a passing automated container validation job
+Prerequisites
+Comfort working in a Linux terminal: navigating directories, editing files with a terminal editor, and reading command output
+Familiarity with Git concepts: repositories, commits, branches, and remote origins
+A GitHub account and a Docker Hub account, both free tier, created before starting this lab
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Step 1.1: Install Docker Engine and Git
+Install Docker Engine using the official apt repository method, then install Git. After installation, add your current user to the docker group so that Docker commands run without sudo, then start a new shell session for the group membership to take effect.
+
+Official Docker installation guide (use this if any URL below has changed): https://docs.docker.com/engine/install/ubuntu/
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg git
+
+sudo install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means the file contains a literal backslash instead of a single unbroken line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list; if it spans more than one line or contains \, delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc form shown above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+Step 1.2: Verify All Tools and Authenticate with Docker Hub
+Run the following verification block. Every command must exit without error and print a version string or confirmation message. Then log in to Docker Hub so that later pipeline steps can push images.
+
+docker --version
+git --version
+docker run --rm hello-world
+docker login
+After docker login completes successfully, Docker writes credentials to ~/.docker/config.json. Confirm the file exists:
+
+test -f ~/.docker/config.json && echo "Docker credentials file present" || echo "Login may have failed"
+Troubleshoot this step:
+
+You may see: permission denied while trying to connect to the Docker daemon socket even after running usermod.
+Run groups to confirm docker appears in the list; if it does not, log out of the SSH session completely, log back in, and retry.
+Official reference: https://docs.docker.com/engine/install/linux-postinstall/
+Confirmation: All version commands print output, hello-world prints "Hello from Docker!", and the credentials file exists.
+
+Task 2: Build a Containerized Application and Push It to Docker Hub via CircleCI
+Problem Statement
+Design and implement a system in which every git push to the main branch of a GitHub repository triggers a CircleCI pipeline that: builds a Docker image from a Dockerfile you write, runs a container from that image and validates it passes a health check, and then pushes the image to Docker Hub tagged with both the CircleCI commit SHA and latest. The pipeline must use CircleCI workspaces (a mechanism for passing files between jobs in the same workflow) to build the image once and reuse the saved image tarball in the test and push jobs, rather than rebuilding it in each job.
+
+The application inside the container must expose at minimum two HTTP endpoints: one root endpoint returning a JSON body, and one /health endpoint returning HTTP 200 with a JSON body containing a status field set to the string healthy. The choice of language and framework is yours.
+
+Acceptance Criterion 1: The CircleCI workflow completes all three jobs (build, test, push) in the correct dependency order, the test job exits 0 only when the health endpoint returns HTTP 200 with status: healthy, and the push job is skipped entirely when the workflow runs on any branch other than main.
+
+Acceptance Criterion 2: After a successful pipeline run on main, the image is visible on Docker Hub under your account tagged with both latest and the exact 40-character commit SHA that triggered the build, confirmed by running docker pull <your-dockerhub-username>/your-image:<sha> locally and verifying the pulled image starts a container that passes the health check.
+
+Task 3: Optimize Pipeline Performance with Caching and Implement a Validation Gate
+Problem Statement
+Extend the CircleCI configuration from Task 2 to add two improvements. First, enable Docker layer caching in every job that calls setup_remote_docker (CircleCI's mechanism for running Docker commands inside a pipeline job) and add a CircleCI restore_cache / save_cache step pair that caches the node_modules directory (or the equivalent dependency directory for your chosen language) keyed on a checksum of your dependency manifest file, so that dependency installation is skipped on subsequent runs when the manifest has not changed. Second, insert a dedicated validation job between the test job and the push job. This validation job must load the image tarball from the CircleCI workspace, start a container, poll the /health endpoint with a retry loop that attempts the check up to ten times with a five-second delay between attempts, and fail the entire workflow if the endpoint does not return status: healthy within those ten attempts. The push job must declare an explicit requires dependency on the validation job so that a failed validation prevents any image from reaching Docker Hub.
+
+Acceptance Criterion 1: On a pipeline run where the dependency manifest is unchanged from the previous run, the CircleCI job log for the build job shows a cache restore hit and the dependency installation step is skipped or reports zero packages installed, reducing that job's duration by at least 20 percent compared to the first run (compare the job timing visible in the CircleCI UI).
+
+Acceptance Criterion 2: When you deliberately break the /health endpoint in your application code, commit, and push to main, the validation job exits non-zero after exhausting all ten retry attempts, the push job does not execute (shown as "not run" or "blocked" in the CircleCI workflow graph), and no new image tag appears on Docker Hub for that commit SHA.
+
+Expected Outcomes
+A fully automated CircleCI pipeline that builds, validates, and publishes a Docker image to Docker Hub on every push to main, with the push gated behind a passing health-check validation job.
+A measurable reduction in pipeline duration on cache-hit runs compared to cold runs, demonstrated by CircleCI job timing in the workflow UI.
+Conclusion
+This lab required you to design a multi-job CircleCI workflow from first principles, making deliberate decisions about job ordering, artifact passing via workspaces, and cache key design. The validation gate pattern you implemented â where a dedicated job must pass before any artifact reaches a registry â is a standard practice in production CI/CD pipelines for preventing broken images from reaching downstream environments. Extend this foundation by adding a security scanning job using a tool such as Trivy between the build and validation jobs, or by adding a second workflow that deploys the pushed image to a staging server when a Git tag is created.
