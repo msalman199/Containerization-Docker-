@@ -1,0 +1,72 @@
+---
+- name: Advanced Container Configuration Management
+  hosts: docker_hosts
+  become: yes
+  vars:
+    environment: "production"
+    server_name: "webapp.local"
+    containers:
+      - name: web-app-1
+        image: nginx:latest
+        port: 8082
+      - name: web-app-2
+        image: nginx:latest
+        port: 8083
+      - name: web-app-3
+        image: nginx:latest
+        port: 8084
+
+  tasks:
+    - name: Create configuration directory
+      file:
+        path: /tmp/nginx-configs
+        state: directory
+        mode: '0755'
+
+    - name: Generate Nginx configuration files
+      template:
+        src: templates/nginx.conf.j2
+        dest: "/tmp/nginx-configs/{{ item.name }}.conf"
+        mode: '0644'
+      loop: "{{ containers }}"
+
+    - name: Deploy multiple configured containers
+      docker_container:
+        name: "{{ item.name }}"
+        image: "{{ item.image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ item.port }}:80"
+        volumes:
+          - "/tmp/nginx-configs/{{ item.name }}.conf:/etc/nginx/conf.d/default.conf:ro"
+          - "/tmp/nginx-content:/usr/share/nginx/html:ro"
+        labels:
+          environment: "{{ environment }}"
+          managed_by: "ansible"
+          deployment_date: "{{ ansible_date_time.epoch }}"
+      loop: "{{ containers }}"
+
+    - name: Wait for containers to be healthy
+      uri:
+        url: "http://localhost:{{ item.port }}/health"
+        method: GET
+        status_code: 200
+      loop: "{{ containers }}"
+      retries: 5
+      delay: 3
+
+    - name: Display container information
+      docker_container_info:
+        name: "{{ item.name }}"
+      loop: "{{ containers }}"
+      register: container_details
+
+    - name: Show deployment summary
+      debug:
+        msg: |
+          Container: {{ item.container.Name }}
+          Status: {{ item.container.State.Status }}
+          Port: {{ item.container.NetworkSettings.Ports['80/tcp'][0].HostPort }}
+          Environment: {{ item.container.Config.Labels.environment }}
+      loop: "{{ container_details.results }}"
