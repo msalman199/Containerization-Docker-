@@ -1,0 +1,84 @@
+Docker in Production on DigitalOcean
+Objectives
+Deploy a containerized Node.js application to a DigitalOcean droplet with a production-grade restart policy and health check endpoint
+Configure Nginx as a software load balancer distributing traffic across multiple container instances on the same host
+Implement a Prometheus and cAdvisor monitoring stack that collects and exposes per-container CPU and memory metrics
+Prerequisites
+Comfortable with Linux command-line operations including file editing, process management, and SSH
+Understands Docker core concepts: images, containers, Dockerfiles, port mapping, and container lifecycle
+Has a DigitalOcean account with billing enabled (a $6/month Basic droplet is sufficient; destroy it after the lab)
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Requirement 1
+Install Docker Engine, Docker Compose plugin, Nginx, curl, and jq on the EC2 instance using Docker's official apt repository. After installation, confirm that the Docker daemon is active and that a non-root invocation of docker run hello-world exits with code 0.
+
+Official Docker installation guide (consult this if any URL below has changed): https://docs.docker.com/engine/install/ubuntu/
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release jq nginx
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+sudo tee /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+sudo usermod -aG docker $USER
+newgrp docker
+docker run hello-world
+Troubleshoot this step:
+
+You may see E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list if the heredoc wrote a broken line.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be one unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate it.
+Official reference: https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
+Requirement 2
+Provision a DigitalOcean droplet (Ubuntu 22.04 LTS, 1 vCPU, 1 GB RAM) through the DigitalOcean control panel, SSH into it from the EC2 instance, and repeat the Docker installation steps above on the droplet. Confirm that docker info returns without error on the droplet and that the droplet's public IP is reachable on port 22 from the EC2 instance.
+
+Confirmation: docker info on the droplet prints Server Version without any permission-denied errors, and ssh root@<DROPLET_IP> echo ok from the EC2 instance prints ok.
+
+Task 2: Deploy a Load-Balanced Containerized Web Application
+Problem Statement
+Design and implement a system that runs a Node.js HTTP application inside Docker containers on the DigitalOcean droplet, with Nginx on the same host acting as a round-robin load balancer (a proxy that distributes incoming requests across multiple backend servers) across at least three container instances. The application must expose a /health endpoint returning JSON with the container hostname and a UTC timestamp. Nginx must listen on port 80 and forward requests to the containers. The entire setup must survive a full droplet reboot â all containers and Nginx must return to a running state automatically without manual intervention.
+
+Constraints:
+
+The Docker image must be built from a custom Dockerfile using node:18-alpine as the base; no pre-built application images from Docker Hub are permitted
+Each container instance must run with --restart unless-stopped and include a HEALTHCHECK instruction in the Dockerfile that polls /health every 30 seconds
+Nginx configuration must define an upstream block; direct proxy_pass to a single hardcoded address is not acceptable
+No Docker Compose is permitted for the application containers in this task; containers must be started with docker run
+Acceptance Criteria:
+
+Running for i in $(seq 1 9); do curl -s http://<DROPLET_IP>/health | jq -r .hostname; done from the EC2 instance must print at least two distinct hostnames across the nine responses, confirming that Nginx is distributing load across multiple containers.
+
+After executing sudo reboot on the droplet and waiting 90 seconds, curl -sf http://<DROPLET_IP>/health must return HTTP 200 with a valid JSON body, and docker ps on the droplet must show all three application containers in Up status â confirming automatic restart with no manual action.
+
+Task 3: Implement a Container Metrics Monitoring Stack
+Problem Statement
+Design and implement a monitoring stack on the DigitalOcean droplet using Docker Compose (a tool that defines and runs multi-container applications from a single YAML file) that deploys Prometheus, cAdvisor, and Grafana as services. Prometheus must scrape per-container CPU and memory metrics from cAdvisor every 15 seconds. Grafana must be pre-configured with Prometheus as its default data source so that a user can immediately execute a PromQL query (Prometheus Query Language â a read-only expression language for selecting and aggregating time-series data) in the Explore view without any manual data-source setup. Additionally, write a standalone shell script that queries the Prometheus HTTP API and prints a plain-text report showing the current CPU usage percentage and memory usage in megabytes for each running application container; the script must exit with code 1 and print a human-readable error if the Prometheus API is unreachable.
+
+Constraints:
+
+All three monitoring services must be defined in a single docker-compose.yml file and started with one docker compose up -d command
+Grafana's admin password and the Prometheus scrape interval must be supplied via environment variables or a .env file â no hardcoded values in docker-compose.yml
+The shell script must use only curl and jq for HTTP requests and JSON parsing; no Python, Node.js, or other runtimes are permitted
+cAdvisor must mount /var/lib/docker read-only so it can inspect container filesystems without write access
+Prometheus data must persist across container restarts using a named Docker volume
+Acceptance Criteria:
+
+Running curl -sf "http://<DROPLET_IP>:9090/api/v1/query?query=container_memory_usage_bytes{name=~'web-app.*'}" | jq '.data.result | length' from the EC2 instance must return a number greater than or equal to 3, confirming that Prometheus has scraped memory metrics for all three application containers.
+
+Executing the shell script from the EC2 instance (passing the droplet IP as an argument or environment variable) must print a formatted table with one row per application container showing its name, CPU percentage, and memory in MB â all values non-zero â and must exit with code 1 and print ERROR: Prometheus unreachable at <address> when the Prometheus port is blocked or the service is stopped.
+
+Expected Outcomes
+A DigitalOcean droplet running three containerized Node.js instances behind Nginx, surviving reboots, with load distribution confirmed by distinct hostnames across repeated requests
+A Prometheus and Grafana monitoring stack collecting live per-container metrics, queryable via the Prometheus API and visualised in Grafana, with automated reporting via a shell script
+Conclusion
+This lab required you to make independent decisions about application structure, container configuration, Nginx upstream design, and monitoring integration â the same decisions made in real production deployments. The reboot-survival requirement enforces production-grade restart policies rather than one-shot demos. Destroy the DigitalOcean droplet immediately after completing the lab to avoid ongoing charges.
