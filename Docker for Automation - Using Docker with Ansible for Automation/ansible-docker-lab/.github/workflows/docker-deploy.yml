@@ -1,0 +1,55 @@
+name: Docker Deployment Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  ANSIBLE_HOST_KEY_CHECKING: False
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.8'
+    
+    - name: Install dependencies
+      run: |
+        pip install ansible docker
+        
+    - name: Lint Ansible playbooks
+      run: |
+        ansible-lint deploy-nginx.yml || true
+        
+    - name: Validate YAML syntax
+      run: |
+        ansible-playbook --syntax-check deploy-nginx.yml
+
+  deploy-staging:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Deploy to staging
+      run: |
+        ansible-playbook -i inventory.ini deploy-nginx.yml -e "environment=staging"
+
+  deploy-production:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Deploy to production
+      run: |
+        ansible-playbook -i inventory.ini deploy-nginx.yml -e "environment=production"
