@@ -1,0 +1,72 @@
+name: Secure Docker Build and Deploy
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_CONTENT_TRUST: 1
+  REGISTRY: docker.io
+  IMAGE_NAME: labuser/secure-app
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Run security scan
+      run: |
+        # Install security scanning tools
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        
+        # Scan Dockerfile for security issues
+        docker run --rm -i hadolint/hadolint < Dockerfile
+
+  build-and-sign:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Enable Docker Content Trust
+      run: |
+        export DOCKER_CONTENT_TRUST=1
+        echo "DOCKER_CONTENT_TRUST=1" >> $GITHUB_ENV
+    
+    - name: Import signing keys
+      run: |
+        echo "${{ secrets.DOCKER_TRUST_PRIVATE_KEY }}" | base64 -d > private_key.pem
+        docker trust key load private_key.pem
+        rm private_key.pem
+    
+    - name: Build and push signed image
+      run: |
+        docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+        docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+    
+    - name: Verify image signature
+      run: |
+        docker trust inspect ${{ env.IMAGE_NAME }}:${{ github.sha }} --pretty
+
+  deploy:
+    needs: build-and-sign
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - name: Deploy to production
+      run: |
+        export DOCKER_CONTENT_TRUST=1
+        # Deployment commands would go here
+        echo "Deploying signed image: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
