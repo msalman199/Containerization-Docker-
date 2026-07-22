@@ -1,0 +1,74 @@
+---
+- name: Monitor and Rollback Docker Services
+  hosts: docker_hosts
+  become: yes
+  vars:
+    health_check_timeout: 30
+    rollback_enabled: true
+    
+  tasks:
+    - name: Get current container information
+      docker_container_info:
+        name: "{{ item }}"
+      loop:
+        - nginx-web
+        - wordpress-app
+        - wordpress-mysql
+      register: current_containers
+      ignore_errors: yes
+
+    - name: Check container health
+      uri:
+        url: "http://localhost:{{ item.port }}"
+        method: GET
+        timeout: 5
+      loop:
+        - { name: "nginx", port: 8080 }
+        - { name: "wordpress", port: 8081 }
+      register: health_checks
+      ignore_errors: yes
+
+    - name: Identify unhealthy services
+      set_fact:
+        unhealthy_services: "{{ health_checks.results | selectattr('failed', 'equalto', true) | map(attribute='item.name') | list }}"
+
+    - name: Display health status
+      debug:
+        msg: |
+          Service Health Status:
+          {% for check in health_checks.results %}
+          - {{ check.item.name }}: {{ 'HEALTHY' if not check.failed else 'UNHEALTHY' }}
+          {% endfor %}
+
+    - name: Rollback unhealthy services
+      block:
+        - name: Stop unhealthy containers
+          docker_container:
+            name: "{{ item }}-web"
+            state: stopped
+          loop: "{{ unhealthy_services }}"
+          when: rollback_enabled and unhealthy_services | length > 0
+
+        - name: Deploy previous version
+          docker_container:
+            name: "{{ item }}-web-backup"
+            image: "{{ item }}:previous"
+            state: started
+            restart_policy: always
+            ports:
+              - "{{ 8080 if item == 'nginx' else 8081 }}:80"
+          loop: "{{ unhealthy_services }}"
+          when: rollback_enabled and unhealthy_services | length > 0
+
+      when: unhealthy_services | length > 0
+
+    - name: Send notification
+      debug:
+        msg: |
+          Deployment Status Report:
+          - Total services checked: {{ health_checks.results | length }}
+          - Healthy services: {{ health_checks.results | selectattr('failed', 'equalto', false) | list | length }}
+          - Unhealthy services: {{ unhealthy_services | length }}
+          {% if unhealthy_services | length > 0 %}
+          - Rollback performed: {{ rollback_enabled }}
+          {% endif %}
