@@ -1,0 +1,129 @@
+Docker Image Vulnerability Scanning with Clair
+Objectives
+Deploy a Clair vulnerability scanner (a service that inspects container image layers against a CVE database) backed by PostgreSQL on a self-configured Ubuntu host
+Build and scan Docker images of varying security posture, producing structured JSON reports that quantify vulnerabilities by severity
+Integrate automated scanning into a registry-push workflow so every new image is scanned without manual intervention
+Prerequisites
+Comfort with Ubuntu command-line administration, including package management and file editing
+Familiarity with Docker concepts: images, layers, registries, and Compose service definitions
+Basic understanding of CI/CD pipeline concepts and JSON data structures
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Full Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, and supporting utilities
+Install Docker Engine from the official Docker apt repository, then install Docker Compose v2 as a plugin, and finally install jq (a command-line JSON processor), curl, and wget.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release jq wget python3 python3-pip
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Official guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+Troubleshoot this step:
+
+You may see E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list if the tee heredoc wrote a backslash into the file.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete the file with sudo rm /etc/apt/sources.list.d/docker.list and recreate it using the heredoc above.
+https://docs.docker.com/engine/install/ubuntu/
+Step 1.2 â Install the clair-scanner client and verify all tools
+Download the clair-scanner binary (a standalone client that submits image layers to a running Clair API and returns a vulnerability report), place it on your PATH, and confirm every tool responds correctly.
+
+wget -fsSL https://github.com/arminc/clair-scanner/releases/download/v12/clair-scanner_linux_amd64 \
+  -O /tmp/clair-scanner
+If the URL above returns a 404, find the current release at: https://github.com/arminc/clair-scanner/releases
+
+sudo install -m 0755 /tmp/clair-scanner /usr/local/bin/clair-scanner
+
+docker --version
+docker compose version
+clair-scanner --help
+jq --version
+Troubleshoot this step:
+
+You may see bash: clair-scanner: command not found after the install command.
+Confirm the binary landed in the right place with ls -lh /usr/local/bin/clair-scanner and that /usr/local/bin is in your PATH with echo $PATH.
+https://github.com/arminc/clair-scanner/releases
+Acceptance criteria for Task 1:
+
+docker compose version prints a version string of v2.x or higher with exit code 0.
+clair-scanner --help prints usage text and exits without error.
+Task 2: Deploy Clair and Produce Vulnerability Reports for Two Images
+Problem Statement
+Design and implement a running Clair scanning environment that can accept image scan requests and return structured vulnerability data. You must then build two Docker images â one intentionally using an outdated base and one hardened â scan both, and produce JSON reports that allow a side-by-side severity comparison.
+
+Constraints:
+
+Clair and its PostgreSQL backend must run as Docker Compose services sharing a private bridge network; no service port other than the Clair API port (6060) and health port (6061) may be exposed to 0.0.0.0 unnecessarily.
+The Clair configuration file must be mounted from the host, not baked into the image.
+Both Docker images you build must contain a working Python 3 HTTP server (any response on port 8000 is sufficient) so the images have a real application layer to scan.
+The outdated image must use ubuntu:18.04 as its base; the hardened image must use ubuntu:22.04, run as a non-root user, and install only the packages strictly required for the Python server.
+Scan reports must be written to ~/clair-lab/reports/ as valid JSON files; a report with zero vulnerabilities is acceptable for the hardened image but the file must exist and be valid JSON.
+What you must figure out yourself:
+
+The exact Clair config.yaml structure (refer to the Clair v2 documentation at https://github.com/quay/clair/blob/v2.1.8/Documentation/configuration.md).
+How long to wait for Clair's vulnerability database to perform its first update before scans return meaningful data (the health endpoint at /health and the Clair logs are your signals).
+The correct --ip flag value to pass to clair-scanner so Clair can reach back to the Docker daemon on your host to pull image layers.
+Step 2.1 â Stand up Clair and confirm it is healthy
+Create the Compose file and configuration, start the stack, and poll the health endpoint until Clair reports healthy. You must confirm the health endpoint returns HTTP 200 before proceeding.
+
+Acceptance criteria:
+
+curl -sf http://localhost:6061/health exits with code 0 and returns a JSON body (the exact fields do not matter).
+docker compose ps shows both the postgres and clair containers in a running state with no restart loops (check with docker compose logs clair | tail -20).
+Step 2.2 â Build both images, scan them, and compare severity counts
+Build the outdated image and the hardened image, scan each with clair-scanner, write the reports to ~/clair-lab/reports/, and then use jq to print a severity summary table to stdout for each image.
+
+Acceptance criteria:
+
+Both ~/clair-lab/reports/outdated-report.json and ~/clair-lab/reports/hardened-report.json exist, are valid JSON (verified with jq . <file> > /dev/null), and each contains a top-level key named vulnerabilities.
+The jq summary command you write prints at minimum the count of Critical, High, Medium, and Low findings for each image, and the outdated image report contains a strictly greater total vulnerability count than the hardened image report (zero findings in the hardened report satisfies this criterion).
+Task 3: Build an Automated Registry-Push Scanning Pipeline
+Problem Statement
+Design and implement a pipeline that monitors a local Docker registry (the official registry:2 image) and automatically scans any image pushed to it, writing a timestamped report and printing a pass/fail decision based on a configurable severity threshold.
+
+Constraints:
+
+The local registry must run as a Docker container on port 5000.
+The pipeline must be implemented as a single executable Bash script named auto-scan.sh; no external orchestration tools (Jenkins, GitHub Actions runners) are permitted in this task because the goal is to understand the mechanics before abstracting them.
+The script must accept exactly one argument: the severity threshold (one of Critical, High, Medium, Low). If the scanned image contains any vulnerability at or above the threshold, the script must exit with code 1 and print FAIL: <image-name> exceeds threshold <threshold> to stdout. If the image is clean relative to the threshold, it must exit with code 0 and print PASS: <image-name>.
+The script must tag and push the hardened image you built in Task 2 to the local registry, then scan it from the registry reference (for example localhost:5000/hardened-app:latest), not from the local image cache.
+Reports must be written to ~/clair-lab/reports/ with filenames that include the image name and a Unix timestamp so repeated scans do not overwrite each other.
+The script must not require any manual input after it is invoked; all configuration (Clair URL, registry URL, host IP) must be derived automatically or read from environment variables with documented defaults at the top of the script.
+What you must figure out yourself:
+
+How to instruct Docker to allow pushes to an insecure (HTTP) local registry on port 5000 (the Docker daemon's insecure-registries configuration is the relevant mechanism).
+How to parse the clair-scanner exit code versus the JSON report to determine whether the threshold was breached, given that clair-scanner itself exits non-zero when vulnerabilities above the threshold are found.
+How to derive the host IP that Clair can route back to for layer fetching when the script runs in a non-interactive context.
+Step 3.1 â Configure the local registry and validate push/pull
+Start the local registry container, configure the Docker daemon to trust it as an insecure registry, push the hardened image to it, and confirm the registry catalog API lists the image.
+
+Acceptance criteria:
+
+curl -sf http://localhost:5000/v2/_catalog returns a JSON object whose repositories array contains the name of your pushed image.
+docker pull localhost:5000/hardened-app:latest succeeds after you have removed the local copy with docker rmi localhost:5000/hardened-app:latest to prove the pull is genuinely from the registry.
+Step 3.2 â Implement and validate auto-scan.sh
+Write, make executable, and run auto-scan.sh twice: once with a threshold of Critical (expected to pass for the hardened image) and once with a threshold of Low (expected to fail if any low-severity findings exist, or pass if the hardened image is fully clean â either outcome is acceptable as long as the exit code matches the printed verdict).
+
+Acceptance criteria:
+
+Both invocations produce a timestamped report file in ~/clair-lab/reports/ that is valid JSON, confirmed with jq . <file> > /dev/null && echo valid.
+The script's stdout verdict string and its exit code are consistent: exit code 0 always accompanies a PASS line, and exit code 1 always accompanies a FAIL line, verified by running ./auto-scan.sh Critical; echo "Exit: $?" and ./auto-scan.sh Low; echo "Exit: $?" and inspecting both outputs.
+Expected Outcomes
+You have a reproducible, self-contained Clair scanning stack defined entirely in files you authored, capable of producing structured vulnerability reports for any locally available Docker image.
+You have a working automated pipeline script that enforces a severity gate on registry images, demonstrating the core mechanic used by production CI/CD security stages.
+Conclusion
+This lab required you to configure a non-trivial multi-service security tool from first principles, reason about network routing between containers and the host, and translate raw vulnerability data into actionable pass/fail decisions. The patterns you implemented â severity thresholds, timestamped audit reports, and registry-integrated scanning â are directly transferable to production pipelines using tools such as Trivy, Grype, or cloud-native registry scanning services. As a next step, consider replacing the Bash polling loop with a registry notification webhook to eliminate the need for the script to push the image itself.
+
