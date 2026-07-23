@@ -1,0 +1,123 @@
+Docker for Continuous Integration â Running Integration Tests in Docker
+Objectives
+Design and deploy a multi-container application stack using Docker and Docker Compose, with a PostgreSQL database backend and a Node.js API layer
+Author a suite of integration tests that validate cross-container communication, data persistence, and API correctness
+Build a Jenkins CI pipeline that automatically builds images, runs the test suite inside containers, and publishes structured test results
+Prerequisites
+Comfort navigating and editing files on a Linux/Ubuntu command line
+Conceptual understanding of how HTTP APIs and relational databases interact
+Familiarity with what a CI/CD pipeline does at a high level (trigger, build, test, report)
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Required Toolchain
+Step 1.1 â Install Docker Engine, Docker Compose, Node.js, and Jenkins
+Install Docker Engine from the official Docker apt repository, then install the Docker Compose plugin, Node.js 20.x from the NodeSource repository, and Jenkins from the official Jenkins Debian repository. After installation, add your user to the docker group so that Docker commands run without sudo, then start and enable both the Docker and Jenkins system services.
+
+Official installation references if any URL below has changed:
+
+Docker: https://docs.docker.com/engine/install/ubuntu/
+Node.js: https://github.com/nodesource/distributions
+Jenkins: https://www.jenkins.io/doc/book/installing/linux/
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg lsb-release git
+
+# Docker Engine
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker "$USER"
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means a backslash or newline corrupted the file.
+Run cat /etc/apt/sources.list.d/docker.list and confirm it is a single unbroken line; delete and recreate with the heredoc above if it is not.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+# Node.js 20.x
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+Troubleshoot this step:
+
+You may see: E: Package 'nodejs' has no installation candidate after running the setup script.
+Run cat /etc/apt/sources.list.d/nodesource.list and confirm the suite matches your Ubuntu codename (jammy for 22.04); if the file is empty or missing, re-run the curl command above.
+Official reference: https://github.com/nodesource/distributions#debian-and-ubuntu-based-distributions
+# Jenkins
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key \
+  | sudo tee /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+
+sudo tee /etc/apt/sources.list.d/jenkins.list <<'EOF'
+deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/
+EOF
+
+sudo apt-get update -y
+sudo apt-get install -y jenkins java-17-openjdk-amd64
+
+sudo systemctl enable --now docker
+sudo systemctl enable --now jenkins
+
+# Allow Jenkins to run Docker commands
+sudo usermod -aG docker jenkins
+sudo systemctl restart jenkins
+Troubleshoot this step:
+
+You may see: error: no such file or directory: /usr/share/keyrings/jenkins-keyring.asc or Jenkins fails to start with Failed to start jenkins.service.
+Confirm the key file exists with ls -lh /usr/share/keyrings/jenkins-keyring.asc; if missing, re-run the curl command above, then check Java is installed with java -version.
+Official reference: https://www.jenkins.io/doc/book/installing/linux/#debianubuntu
+Step 1.2 â Verify Every Tool Responds Correctly
+Run each verification command below and confirm the expected output before proceeding. A new shell session is required after the usermod command so that the docker group membership takes effect.
+
+newgrp docker
+docker run --rm hello-world
+docker compose version
+node --version
+npm --version
+jenkins --version
+curl -fsSL http://localhost:8080/login | grep -o "Jenkins"
+You should observe: Docker prints Hello from Docker!, docker compose version returns a version string beginning with v2, node --version prints v20.x.x, and the final curl command prints Jenkins, confirming the web UI is reachable.
+
+Task 2: Design and Deploy a Containerised Multi-Service Application with Integration Tests
+Step 2.1 â Build a Multi-Container Application Stack
+Design and implement a project containing three services orchestrated by Docker Compose: a PostgreSQL 15 database, a Node.js REST API that performs CRUD operations against that database, and a dedicated test runner container. The API must expose at minimum four HTTP endpoints: a health check, a database connectivity probe, a resource listing endpoint, and a resource creation endpoint. The database schema must be initialised automatically when the stack starts â no manual SQL steps are permitted. All inter-service credentials must be supplied exclusively through environment variables; no credentials may be hard-coded in source files.
+
+Acceptance criteria:
+
+Running docker compose up --build from the project root brings all three services to a healthy state within 120 seconds, verified by docker compose ps showing healthy for the database and API containers and running for the test runner.
+curl http://localhost:3000/health returns HTTP 200 with a JSON body containing a status field equal to "healthy", and curl http://localhost:3000/db-status returns HTTP 200 with a JSON body containing a status field equal to "connected", both without any manual intervention after docker compose up.
+Step 2.2 â Author and Execute a Passing Integration Test Suite
+Design and implement an integration test suite that runs inside the dedicated test runner container and communicates with the API and database over the Docker Compose internal network. The suite must cover: API health, database connectivity, successful resource creation, retrieval of created resources, and rejection of a duplicate resource. Tests must wait for upstream services to be ready before executing â no fixed sleep delays are permitted. The suite must produce a JUnit-format XML report written to a host-mounted volume so results survive container removal.
+
+Acceptance criteria:
+
+Executing docker compose -f docker-compose.test.yml up --build --abort-on-container-exit exits with code 0 and the test runner container logs show all test cases passing with zero failures.
+A JUnit XML file is present on the host at ./test-results/junit.xml after the run completes, contains at least five <testcase> elements, and has a failures="0" attribute on the root <testsuite> element, verifiable with grep 'failures="0"' test-results/junit.xml.
+Task 3: Build and Validate a Jenkins CI Pipeline
+Step 3.1 â Configure Jenkins and Create a Declarative Pipeline
+Complete the Jenkins initial setup by navigating to http://<your-instance-public-ip>:8080, unlocking Jenkins with the password found at /var/jenkins_home/secrets/initialAdminPassword (or /var/lib/jenkins/secrets/initialAdminPassword depending on installation method), installing the suggested plugins plus the Docker Pipeline plugin, and creating an admin account. Then create a declarative Jenkinsfile in your project repository that defines the following named stages in order: Checkout, Build Images, Start Services, Run Integration Tests, Publish Results, and Cleanup. The Cleanup stage must run in a post { always { } } block so containers are removed even when tests fail. The pipeline must pass the Docker socket into the build environment so that Docker commands execute from within the Jenkins agent.
+
+Acceptance criteria:
+
+Triggering a build from the Jenkins UI completes all six named stages with green status indicators, and the Jenkins build log shows the string All integration tests passed (or the equivalent success summary from your chosen test framework) without any manual intervention after clicking Build Now.
+The Cleanup stage removes all containers and volumes created during the build, verified by running docker ps -a and docker volume ls on the host immediately after the pipeline finishes and confirming no project-namespaced containers or volumes remain.
+Step 3.2 â Enable Scheduled Execution and Confirm Artifact Archival
+Extend the pipeline to run automatically on a cron schedule of every 15 minutes using a Jenkins triggers { cron(...) } block. Configure the pipeline to archive the JUnit XML report using the junit step so that Jenkins renders a test trend graph, and archive the container log files using archiveArtifacts. Confirm that two consecutive scheduled builds complete without manual intervention and that the test trend graph appears on the job page.
+
+Acceptance criteria:
+
+After saving the updated Jenkinsfile and waiting up to 30 minutes, at least two builds appear in the Jenkins build history with timestamps 15 minutes apart and both show a green result, confirming the cron trigger is active.
+Each completed build's detail page shows a Test Result link that opens a report listing all test cases by name with zero failures, and an Archived Artifacts section containing both the JUnit XML file and at least one container log file.
+Expected Outcomes
+A fully automated Docker-based CI workflow exists in which a single git push or scheduled trigger causes Jenkins to build images, start a multi-container environment, execute integration tests inside that environment, publish structured results, and clean up all resources without human input.
+The Jenkins job page displays a test trend graph that accumulates data across multiple builds, demonstrating that the pipeline is repeatable and that test history is preserved.
+Conclusion
+This lab required you to design every layer of a containerised CI system from scratch: the application, the test harness, the multi-service orchestration, and the pipeline automation. The deliberate absence of templates forces you to reason about service dependencies, network isolation, credential management, and artifact lifecycle â skills that transfer directly to production CI/CD environments. Extend this foundation by adding code coverage reporting, parallel test shards, or a Docker image vulnerability scan stage as your next challenge.
+
+Lab Terminal
+
+Instructions
