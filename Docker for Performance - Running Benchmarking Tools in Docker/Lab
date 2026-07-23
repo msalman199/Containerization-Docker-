@@ -1,0 +1,109 @@
+ Docker for Performance - Running Benchmarking Tools in Docker
+Objectives
+Design and deploy a containerized web application alongside custom-built benchmarking tool images, establishing a Docker network that allows containers to communicate by name
+Execute coordinated load tests from multiple simultaneous Docker containers and capture structured performance metrics including requests per second, percentile response times, and failure rates
+Integrate automated performance threshold enforcement into a local CI simulation that fails the pipeline when measured metrics fall below defined baselines
+Prerequisites
+Comfort with Ubuntu command-line operations including file editing, process management, and reading command output
+Conceptual understanding of HTTP request/response cycles and what metrics like latency and throughput mean in the context of a web server
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Environment
+Problem statement: Your instance has no runtime, no container engine, and no benchmarking utilities. Design an installation sequence that leaves the machine with Docker Engine, Docker Compose, Node.js, and the Apache Bench utility all functional and verifiable from the command line.
+
+Step 1: Install Docker Engine from the official Docker apt repository, then install Docker Compose as a standalone binary, then install Node.js via the NodeSource setup script, then install the apache2-utils package which provides the ab binary.
+
+# Remove any conflicting legacy packages
+sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+
+# Install prerequisites for adding the Docker apt repository
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official current guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+# Write the Docker apt source entry using a heredoc to avoid backslash issues
+sudo tee /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate using the heredoc above
+https://docs.docker.com/engine/install/ubuntu/
+# Allow your user to run Docker without sudo
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Install Docker Compose standalone binary
+curl -fsSL "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-x86_64" \
+  -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+Official current guide if the URL above changes: https://docs.docker.com/compose/install/standalone/
+
+Troubleshoot this step:
+
+You may see: docker-compose: /usr/local/bin/docker-compose: cannot execute: required file not found
+The binary may have downloaded as an HTML error page; run file /usr/local/bin/docker-compose â if it says HTML document rather than ELF 64-bit, delete it and re-download using the exact curl command above with -fsSL
+https://docs.docker.com/compose/install/standalone/
+# Install Node.js 20.x via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+Official current guide if the URL above changes: https://github.com/nodesource/distributions
+
+# Install Apache Bench
+sudo apt-get install -y apache2-utils
+Step 2: Verify every installed component reports a version number and Docker can run a container end-to-end.
+
+docker --version
+docker-compose --version
+node --version
+npm --version
+ab -V
+docker run --rm hello-world
+You should see version strings for each tool and the hello-world container should print Hello from Docker! before exiting cleanly. If any command returns command not found, revisit the installation step for that tool before proceeding.
+
+Task 2: Build a Containerized Application and Benchmark It Under Load
+Problem statement: Design and implement a system consisting of three components: (1) a containerized Node.js web application that exposes at minimum two HTTP endpoints â one that responds quickly and one that simulates CPU work â (2) a custom Docker image containing Apache Bench, and (3) a custom Docker image containing Siege (available via apt-get install siege). All three must communicate over a user-defined Docker bridge network using container names as hostnames, with no host-port dependencies between the benchmarking containers and the application container. After deployment, execute load tests from both benchmarking containers and save the raw output to files on the host machine using a bind mount.
+
+Step 1: Write a Dockerfile for the Node.js application, a Dockerfile for the Apache Bench image, and a Dockerfile for the Siege image; build all three images; create a named Docker bridge network; start the application container attached to that network; confirm the application responds to HTTP requests from inside the network by running a one-shot container on the same network and using curl to hit the application by its container name.
+
+Acceptance criteria:
+
+docker images lists all three custom images with no <none> tags
+A one-shot container running curl http://<app-container-name>:3000/ on the shared network returns a valid HTTP 200 response body without using localhost or a host-mapped port
+Step 2: Create a bind-mounted results directory on the host, then run the Apache Bench container and the Siege container sequentially against the application, directing each tool's full output into separate files inside that directory; after both tests complete, write a shell script that reads both output files and prints the following extracted values to stdout: requests per second (from Apache Bench), transaction rate (from Siege), failed request count (from Apache Bench), and availability percentage (from Siege).
+
+Acceptance criteria:
+
+The results directory on the host contains two non-empty output files, one per tool, each containing the tool's standard summary block
+The analysis shell script prints all four named metrics to stdout with labels, sourcing values directly from the saved files using text-processing tools such as grep and awk
+Task 3: Distributed Load Generation and CI Threshold Enforcement
+Problem statement: Design and implement a system that launches three simultaneous load-generator containers â at least two running Apache Bench and one running Siege â all targeting the same application container concurrently, then enforces performance thresholds by failing a local CI simulation script if the measured requests-per-second falls below 40 or if any failed requests are recorded. The CI script must build all images from scratch, start the application, run the tests, evaluate the thresholds, print a clear pass or fail verdict with the measured values, and clean up all containers and the network regardless of whether the tests pass or fail.
+
+Step 1: Write a Docker Compose file that defines the application service and three load-generator services; the load-generator services must start with a long-running idle command (such as sleep infinity) so they remain available for docker compose exec calls; bring the environment up, confirm all four services are in the running state, then trigger all three load generators simultaneously using background shell processes and docker compose exec, directing each generator's output to a separate file; wait for all background processes to finish before proceeding.
+
+Acceptance criteria:
+
+docker compose ps shows all four services with status running before any load test begins
+Three separate output files exist on the host after the concurrent test run, each containing a complete summary block from its respective tool, with file modification timestamps within 10 seconds of each other confirming they ran concurrently
+Step 2: Write a self-contained CI simulation shell script that performs the following steps in order without any manual intervention: build all Docker images, create the network, start the application container, wait for a successful health check using a retry loop, run an Apache Bench test and capture output, extract the requests-per-second value and the failed-requests count, compare them against the thresholds (minimum 40 RPS, zero failed requests), print the measured values and a PASS or FAIL verdict, then unconditionally stop and remove all containers and the network in a cleanup block that runs even if an earlier step exits with a non-zero code.
+
+Acceptance criteria:
+
+Running the script on a healthy application prints the measured RPS and failed-request count alongside a PASS verdict and exits with code 0
+Manually setting the RPS threshold to a value higher than any achievable result (for example 999999) causes the script to print a FAIL verdict and exit with code 1, confirming the enforcement logic is active
+Expected Outcomes
+Three Docker images exist for the application and both benchmarking tools, load tests execute successfully from multiple simultaneous containers over a user-defined network, and raw results are persisted to the host filesystem
+A CI simulation script enforces measurable performance thresholds and produces a deterministic pass or fail exit code based on live benchmark output
+Conclusion
+This lab required you to design a multi-container performance testing architecture from first principles, including custom image construction, Docker networking, concurrent process coordination, and automated threshold enforcement. The pattern of separating the system under test from the load generators using a named bridge network is directly applicable to staging environment pipelines. Threshold-based CI gates built on real benchmark output prevent performance regressions from reaching production undetected.
