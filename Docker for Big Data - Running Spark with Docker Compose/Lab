@@ -1,0 +1,94 @@
+ Deploying and Operating a Distributed Apache Spark Cluster with Docker Compose
+Objectives
+Design and deploy a multi-node Apache Spark cluster using Docker Compose on a bare Ubuntu instance
+Author and submit PySpark jobs that perform distributed text analytics across worker nodes
+Scale the cluster horizontally and validate that additional workers are recognized and utilized
+Prerequisites
+Comfort navigating and editing files from the Ubuntu command line
+Familiarity with YAML syntax and basic networking concepts (ports, hostnames)
+Understanding of what a distributed master-worker architecture means conceptually
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Container Toolchain
+Step 1.1 â Install Docker Engine and Docker Compose Plugin
+Install Docker Engine from Docker's official apt repository, then install the Compose plugin. After installation, add your user to the docker group so you can run Docker commands without sudo.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official installation guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+sudo tee /etc/apt/sources.list.d/docker.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+sudo usermod -aG docker "$USER"
+newgrp docker
+Troubleshoot this step:
+
+Error seen: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list
+Recovery: Run cat /etc/apt/sources.list.d/docker.list â the file must be a single unbroken line with no backslashes; delete it with sudo rm /etc/apt/sources.list.d/docker.list and recreate using the heredoc above.
+Official docs: https://docs.docker.com/engine/install/ubuntu/
+Step 1.2 â Verify the Installation
+Confirm that both Docker Engine and the Compose plugin are operational before proceeding.
+
+docker --version
+docker compose version
+docker run --rm hello-world
+You should observe Docker Engine version 24 or later, Compose version 2.x or later, and the hello-world container printing "Hello from Docker!" â any other output indicates an incomplete installation that must be resolved before continuing.
+
+Task 2: Design and Deploy a Containerized Spark Cluster
+Problem Statement
+Design and implement a Docker Compose-based Apache Spark cluster (Spark is a distributed in-memory data processing engine; the cluster consists of one master node that coordinates work and two or more worker nodes that execute it) that satisfies all of the following constraints:
+
+The cluster must use the bitnami/spark:3.4 image for all nodes
+The master node must expose its Web UI on host port 8080 and its cluster communication port on 7077
+Each worker node must be allocated exactly 2 CPU cores and 2g of memory via environment variables
+All nodes must share a single user-defined bridge network named spark-net
+A local directory named ./workspace must be bind-mounted into every container at /opt/bitnami/spark/workspace so that scripts and data written on the host are immediately visible inside all containers
+The master must declare a health check that polls http://localhost:8080 every 30 seconds; workers must declare a health check that verifies the Spark worker process is running
+The entire cluster must start with a single docker compose up -d command and reach a healthy state within 90 seconds
+Acceptance Criteria
+
+Running docker compose ps shows all containers with status healthy; running curl -s http://localhost:8080 | grep -i "spark master" returns a non-empty match, confirming the master Web UI is reachable from the host.
+The master's Web UI JSON endpoint at http://localhost:8080/json/ returns a workers array containing exactly two entries, each reporting state: ALIVE, confirming both workers have registered with the master.
+Task 3: Author, Submit, and Scale Spark Jobs
+Problem Statement â Phase A: Distributed Text Analytics Job
+Design and implement a PySpark script (PySpark is the Python API for Apache Spark) placed inside ./workspace that performs the following operations when submitted to the running cluster:
+
+Reads every .txt file found under /opt/bitnami/spark/workspace/input/ â you must create at least three .txt files in ./workspace/input/ containing a combined minimum of 200 lines of English text before submitting
+Computes, per source file: total line count, total word count, average line length in characters, and the single most frequent word (excluding words shorter than 4 characters)
+Writes the per-file summary as a single CSV file (one header row, one data row per source file) to /opt/bitnami/spark/workspace/output/summary.csv
+Prints to stdout the top 10 words by frequency across all files combined, with their counts
+The job must be submitted using docker exec against the master container, targeting spark://spark-master:7077 as the master URL, with --executor-memory 1g and --executor-cores 1.
+
+Acceptance Criteria
+
+The spark-submit command exits with code 0; ./workspace/output/summary.csv exists on the host and contains a header row plus one data row per input file, with no empty cells, confirming the job ran to completion across the cluster.
+The combined stdout of the job (captured via docker exec ... spark-submit ... 2>&1 | tee job.log) contains a block listing exactly 10 words with their integer counts in descending order, and grep "ALIVE" job.log returns at least one match showing executor acquisition from a worker node.
+Problem Statement â Phase B: Horizontal Scaling and Re-execution
+Extend the running cluster by adding two additional Spark worker containers (spark-worker-3 and spark-worker-4) without stopping or restarting any already-running container, then re-submit the same analytics job and demonstrate that the scaled cluster utilizes the new workers.
+
+Constraints:
+
+The new workers must join the existing spark-net network and connect to the already-running master at spark://spark-master:7077
+Each new worker must have the same resource allocation (2 cores, 2g memory) as the original workers
+You may use any valid Docker or Docker Compose mechanism to add the workers; the original docker-compose.yml must not be modified
+After the new workers are added, http://localhost:8080/json/ must report four workers in ALIVE state before you re-submit the job
+Acceptance Criteria
+
+curl -s http://localhost:8080/json/ | python3 -c "import sys,json; w=json.load(sys.stdin)['workers']; print(len([x for x in w if x['state']=='ALIVE']))" prints 4, confirming all four workers are registered and alive.
+The re-submitted job's log (tee job_scaled.log) contains executor-acquired messages referencing at least two distinct worker hostnames (for example spark-worker-1 and spark-worker-3), confirming the scheduler distributed work across the expanded cluster.
+Expected Outcomes
+A fully operational four-worker Spark cluster running inside Docker containers, managed by a single Compose project, with all nodes healthy and registered
+Two successful spark-submit executions producing identical CSV output, with the second run demonstrating multi-worker task distribution across the scaled cluster
+Conclusion
+This lab required you to translate distributed systems concepts directly into a working containerized deployment with no scaffolding â every configuration decision, from network topology to health check design to job submission flags, was yours to make and defend. The scaling phase demonstrated that Docker Compose's composability allows live cluster expansion without downtime, a pattern that mirrors real operational workflows. The debugging and research skills exercised here apply directly to production big data infrastructure built on Kubernetes, EMR, or Dataproc.
