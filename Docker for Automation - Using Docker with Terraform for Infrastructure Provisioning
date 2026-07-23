@@ -1,0 +1,114 @@
+Infrastructure as Code â Provisioning and Scaling Docker Containers with Terraform
+Objectives
+Design and deploy a Terraform-managed Docker infrastructure from scratch, applying Infrastructure as Code principles to container lifecycle management
+Implement a multi-container scaled deployment using Terraform's count and variable mechanisms, with environment-specific configuration separation
+Integrate Terraform Docker provisioning into an automated deployment pipeline with health verification and rollback capability
+Prerequisites
+Comfort navigating and editing files in a Linux terminal (file permissions, directory structure, shell scripting)
+Familiarity with Docker concepts: images, containers, port binding, and container lifecycle
+Understanding of version control with Git and basic YAML/HCL syntax patterns
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Complete Toolchain
+Problem statement: Your EC2 instance is a bare Ubuntu system. Before any infrastructure work can begin, you must bring the environment to a known-good state by installing Docker Engine, Terraform, and all supporting utilities, then confirm each tool operates correctly.
+
+Step 1: Install Docker Engine from the official Docker apt repository, add your current user to the docker group so that Docker commands run without sudo, and install Terraform from the official HashiCorp apt repository. After installation, verify both tools respond correctly to version queries and that the Docker daemon is active.
+
+# Update base packages
+sudo apt-get update -y && sudo apt-get install -y ca-certificates curl gnupg lsb-release git jq
+
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repository â single unbroken line written via printf
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' \
+  "$(dpkg --print-architecture)" "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+# Install Docker Engine
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Add current user to docker group
+sudo usermod -aG docker "$USER"
+newgrp docker
+Official Docker installation guide (use this if the URL above changes or returns an error page): https://docs.docker.com/engine/install/ubuntu/
+
+Troubleshoot this step:
+
+You may see E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list if the printf command was interrupted or a backslash was inserted.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the printf command.
+https://docs.docker.com/engine/install/ubuntu/
+# Add HashiCorp GPG key
+curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+# Add HashiCorp repository â single unbroken line written via printf
+printf 'deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com %s main\n' \
+  "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+# Install Terraform
+sudo apt-get update -y
+sudo apt-get install -y terraform
+Official Terraform installation guide (use this if the URL above changes or returns an error page): https://developer.hashicorp.com/terraform/install
+
+Troubleshoot this step:
+
+You may see E: Malformed entry 1 in list file /etc/apt/sources.list.d/hashicorp.list if the repository line contains a literal backslash or was split across lines.
+Run cat /etc/apt/sources.list.d/hashicorp.list â the file must contain exactly one line with no backslashes; delete it with sudo rm /etc/apt/sources.list.d/hashicorp.list and re-run the printf command.
+https://developer.hashicorp.com/terraform/install
+Step 2: Confirm the toolchain is fully operational by running the verification commands below. Every command must exit without error and produce the output described in the acceptance criteria.
+
+# Verify Docker daemon is active
+sudo systemctl status docker --no-pager
+
+# Verify Docker runs without sudo (requires the newgrp command above to have taken effect)
+docker run --rm hello-world
+
+# Verify Terraform is installed and on PATH
+terraform version
+
+# Verify jq is available (used later for parsing Terraform JSON output)
+jq --version
+Acceptance criteria:
+
+docker run --rm hello-world completes without error and prints the line Hello from Docker! to standard output, and terraform version prints a version string beginning with Terraform v.
+docker ps runs without a permission-denied error, confirming the current user can communicate with the Docker daemon without sudo.
+Task 2: Design and Deploy a Parameterised Multi-Container Infrastructure with Terraform
+Problem statement: Design a complete Terraform project that provisions a set of nginx web-server containers whose count, port assignments, and environment labels are all controlled by input variables â no hard-coded values in the resource blocks. The project must separate concerns across at least three files (main.tf, variables.tf, outputs.tf), use the kreuzwerker/docker provider pinned to a specific version, and expose structured output values that downstream tooling can consume programmatically.
+
+Step 1: Create a project directory, write all Terraform configuration files from scratch, and initialise the working directory. The configuration must declare a docker_image resource for nginx:latest and a docker_container resource that uses Terraform's count meta-argument to create multiple containers, assigning each container a unique name and a unique external port derived from a numeric base-port variable plus the instance index. Define input variables for: container count, name prefix, base external port, and environment label. Define outputs for: all container names (as a list), all external ports (as a list), and a list of fully-formed http://localhost:<port> access URLs.
+
+Confirmation: terraform init completes with the message Terraform has been successfully initialized! and .terraform/providers contains the downloaded kreuzwerker/docker provider binary.
+
+Step 2: Validate, plan, and apply the configuration with a non-default variable file that sets container_count = 3 and a base_external_port of your choice above 8000. After apply, verify the running containers and test HTTP reachability of each one.
+
+Confirmation: docker ps lists exactly three containers whose names match your prefix pattern, and curl -s http://localhost:<each_port> returns an HTTP 200 response containing nginx HTML for all three ports listed in terraform output.
+
+Acceptance criteria:
+
+terraform validate reports Success! The configuration is valid. with zero warnings, and terraform plan shows exactly the number of containers specified in the variable file â no more, no fewer â with no resource replacements triggered by re-running terraform plan a second time on an already-applied state.
+Changing container_count in the variable file and re-running terraform apply adds or removes containers to match the new count without destroying and recreating containers whose index has not changed, confirmed by comparing docker ps output before and after the apply.
+Task 3: Build an Automated Deployment and Rollback Pipeline
+Problem statement: Design and implement a shell-script-based CI/CD pipeline that wraps Terraform to perform environment-targeted deployments, post-deployment health verification, and rollback. The pipeline must accept the target environment (staging or production) and an application version string as positional arguments, apply the corresponding .tfvars file, verify that every provisioned container responds to HTTP requests, and restore the previous Terraform state if any health check fails. All pipeline logic must live in standalone shell scripts â no manual terraform commands should be required once the pipeline is invoked.
+
+Step 1: Create two environment variable files â staging.tfvars and production.tfvars â with different values for container_count, base_external_port, and environment label. Write a deploy.sh script that: accepts <environment> and <version> as arguments; selects the correct .tfvars file; runs terraform init if the .terraform directory is absent; runs terraform plan -out=tfplan followed by terraform apply tfplan; iterates over the port list from terraform output -json to issue a curl health check against each container; and exits with a non-zero code and a clear error message if any health check fails. Write a rollback.sh script that restores terraform.tfstate.backup (the file Terraform writes automatically before each apply) over terraform.tfstate and re-applies to return the infrastructure to its previous state.
+
+Confirmation: Running bash deploy.sh staging 1.0.0 completes without error, prints a success message, and docker ps shows the staging container count defined in staging.tfvars.
+
+Step 2: Simulate a failed deployment by temporarily setting container_count to a value that would conflict with an already-occupied port, observe the pipeline exit with a non-zero code, then invoke rollback.sh and confirm the infrastructure returns to the last known-good state.
+
+Confirmation: After bash rollback.sh, docker ps shows the container count and port assignments that existed before the failed deployment attempt, and curl health checks against those ports all return HTTP 200.
+
+Acceptance criteria:
+
+bash deploy.sh production 2.0.0 completes end-to-end without any manual intervention, applies production.tfvars, and the final line of script output lists every access URL with a confirmed HTTP 200 status code beside it.
+bash rollback.sh executed after a failed or unwanted deployment restores the previous container set within 60 seconds, confirmed by docker ps matching the pre-failure state and all health-check curl commands returning HTTP 200.
+Expected Outcomes
+A fully version-controlled Terraform project that provisions, scales, and tears down Docker containers entirely through code, with no manual Docker commands required for normal operations.
+A working shell-based deployment pipeline that enforces health verification before declaring success and can restore a previous infrastructure state without data loss.
+Conclusion
+This lab demonstrates that container infrastructure can be expressed entirely as declarative code, making deployments reproducible and auditable. The separation of variable files per environment and the automated health-check-and-rollback pattern are the same principles used in production-grade IaC pipelines. As a next step, consider replacing the local Terraform state file with a remote backend such as AWS S3 with DynamoDB locking to enable team collaboration on the same infrastructure.
