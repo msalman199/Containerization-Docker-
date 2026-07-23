@@ -1,0 +1,85 @@
+Docker and CI/CD â Deploying Containers with CircleCI
+Objectives
+Design and implement a multi-stage CircleCI pipeline that builds, tests, and pushes a containerized Node.js application to Docker Hub automatically on every commit to the main branch
+Integrate unit tests and container-level integration tests as mandatory pipeline gates that block image publication on failure
+Instrument the pipeline with per-job success and failure notifications so that every pipeline outcome is observable without opening the CircleCI dashboard
+Prerequisites
+Comfort working on the Ubuntu command line: navigating directories, editing files with nano or vim, and reading command output
+Familiarity with Git concepts: initializing a repository, staging commits, and pushing to a remote on GitHub
+A GitHub account and a Docker Hub account, both created and accessible before the lab begins
+Lab Environment
+You will work on a dedicated AWS EC2 Ubuntu instance provided by Al Nafi. The instance has a base Ubuntu installation; you will install all required tools in Task 1.
+
+Task 1: Install and Verify the Complete Toolchain
+Requirement 1
+Design an installation sequence that produces a working environment containing: Git, Node.js 18 LTS (via the NodeSource repository), npm, Docker Engine (via the official Docker apt repository), and the Docker Compose plugin. Every tool must be installed from its official upstream source, not from the Ubuntu default apt index, because the default index ships outdated versions that are incompatible with the pipeline configuration you will write in Task 2.
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+Add the Docker GPG key and repository:
+
+sudo install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+Official Docker installation guide if the URL above changes: https://docs.docker.com/engine/install/ubuntu/
+
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu %s stable\n' \
+  "$(dpkg --print-architecture)" \
+  "$(lsb_release -cs)" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+Troubleshoot this step:
+
+You may see: E: Malformed entry 1 in list file /etc/apt/sources.list.d/docker.list â this means a backslash or newline was written literally into the file.
+Inspect the file with cat /etc/apt/sources.list.d/docker.list â it must be a single unbroken line; if it is not, delete it with sudo rm /etc/apt/sources.list.d/docker.list and re-run the printf command above.
+Official reference: https://docs.docker.com/engine/install/ubuntu/
+Add the NodeSource repository and install Node.js 18:
+
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs
+Official NodeSource installation guide if the URL above changes: https://github.com/nodesource/distributions
+
+Troubleshoot this step:
+
+You may see: E: Package 'nodejs' has no installation candidate â this means the NodeSource repository was not added successfully.
+Run cat /etc/apt/sources.list.d/nodesource.list and confirm it contains a line beginning with deb; if the file is missing or empty, re-run the curl command above.
+Official reference: https://github.com/nodesource/distributions#installation-instructions
+Allow your user to run Docker without sudo:
+
+sudo usermod -aG docker $USER
+newgrp docker
+Requirement 2
+Verify every installed tool meets the minimum version threshold before proceeding. Run the following block and confirm each line of output matches the stated expectation:
+
+git --version
+node --version
+npm --version
+docker --version
+docker compose version
+Expected observations: git reports 2.x or higher; node reports v18.x; npm reports 9.x or higher; docker reports 24.x or higher; docker compose reports v2.x. If any tool reports a lower version or a command-not-found error, the installation step for that tool must be repeated before continuing.
+
+Task 2: Build the Application, Containerize It, and Publish to Docker Hub
+Requirement 1
+Design and implement a Node.js web application with the following observable contract: a GET / endpoint that returns a JSON body containing at least the fields message, version, and timestamp; a GET /health endpoint that returns HTTP 200 with a JSON body containing status: "healthy" and a numeric uptime field; any undefined route returns HTTP 404. The application must be accompanied by a test suite (using any Node.js test framework of your choice) that asserts all three of the above behaviors and passes with zero failures when executed locally with a single npm command. The application must also be packaged as a Docker image using a multi-stage or single-stage Dockerfile of your own design, where the final image runs the application as a non-root user and exposes port 3000.
+
+Acceptance criteria:
+
+Running npm test in the project directory exits with code 0 and reports at least five passing assertions covering the /, /health, and 404 behaviors.
+Running docker build -t cicd-app:local . followed by docker run -d -p 3000:3000 cicd-app:local and then curl -sf http://localhost:3000/health returns a JSON body where status equals healthy, confirming the containerized application is reachable and the non-root user constraint does not prevent the process from binding to port 3000.
+Requirement 2
+Design and implement a CircleCI pipeline (.circleci/config.yml) that executes the following jobs in dependency order on every push to the main branch: a unit_test job that installs dependencies and runs the test suite inside a Node.js 18 CircleCI convenience image; an integration_test job that builds the Docker image inside a remote Docker environment and verifies the /health endpoint responds HTTP 200 from within the pipeline runner; a build_and_push job that builds the image tagged with both the CircleCI commit SHA ($CIRCLE_SHA1) and latest, authenticates to Docker Hub using environment variables named DOCKER_USERNAME and DOCKER_PASSWORD stored in CircleCI project settings, and pushes both tags. The build_and_push job must be gated: it must not execute unless both unit_test and integration_test succeed. The pipeline must also emit a plaintext success or failure message as the final step of build_and_push using CircleCI's when: on_success and when: on_fail conditional step syntax so that the outcome is visible in the job log without navigating to Docker Hub.
+
+Acceptance criteria:
+
+After a git push origin main, the CircleCI dashboard shows all three jobs completing with green status, and Docker Hub shows the repository $DOCKER_USERNAME/cicd-app containing two tags: latest and the exact 40-character commit SHA of the triggering commit.
+When a deliberate test failure is introduced (by changing one expected assertion value), pushed to main, and then observed in CircleCI, the unit_test job turns red and the build_and_push job does not start, confirming the gate is enforced; after reverting the change and pushing again, all three jobs return to green and both Docker Hub tags are updated.
+Expected Outcomes
+A fully automated CircleCI pipeline that enforces test passage before publishing any Docker image, producing a versioned and latest-tagged image on Docker Hub for every successful commit to main.
+A local integration test script and CircleCI job configuration that together prove the containerized application satisfies its HTTP contract before the image is ever pushed to a registry.
+Conclusion
+This lab required you to design every component of a container CI/CD pipeline from first principles: the application, its test suite, the Dockerfile, and the CircleCI workflow. The gate-enforced job ordering you implemented is the foundational pattern used in production pipelines to prevent broken images from reaching a registry. Extend this foundation by adding a deployment job that pulls the published image onto a remote server using SSH, which is the natural next step toward a fully automated release process.
